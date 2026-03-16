@@ -68,7 +68,7 @@ const latexInline = {
 };
 
 // ─── Custom code block renderer ───
-const renderer = {
+const codeRenderer = {
   code(token) {
     const lang = token.lang || "";
     const displayLang = lang || "plain";
@@ -78,6 +78,7 @@ const renderer = {
     } else {
       highlighted = hljs.highlightAuto(token.text).value;
     }
+    const escaped = escapeHtml(token.text).replace(/"/g, "&quot;");
     return `<div class="code-window">
       <div class="code-window-titlebar">
         <div class="code-window-dots">
@@ -86,6 +87,12 @@ const renderer = {
           <span class="dot dot-green"></span>
         </div>
         <span class="code-window-lang">${escapeHtml(displayLang)}</span>
+        <button class="code-copy-btn" data-code="${escaped}" title="Copy code">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
+            <path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5" stroke="currentColor" stroke-width="1.3"/>
+          </svg>
+        </button>
       </div>
       <pre><code class="hljs">${highlighted}</code></pre>
     </div>`;
@@ -94,11 +101,64 @@ const renderer = {
 
 // ─── Configure marked ───
 marked.use({ extensions: [latexBlock, latexInline] });
-marked.use({ renderer });
+marked.use({ renderer: codeRenderer });
 marked.setOptions({
   breaks: true,
   gfm: true,
 });
+
+// ─── Shortcuts system ───
+const defaultShortcuts = {
+  newNote:        { label: "New Note",             key: "n", meta: true },
+  deleteNote:     { label: "Delete Note",          key: "Backspace", meta: true },
+  toggleEdit:     { label: "Toggle Edit/Preview",  key: "e", meta: true },
+  toggleSidebar:  { label: "Toggle Sidebar",       key: "b", meta: true },
+  save:           { label: "Save Note",            key: "s", meta: true },
+  closeWindow:    { label: "Close Window",         key: "w", meta: true },
+  openPalette:    { label: "Search Notes",         key: "k", meta: true },
+  commandPalette: { label: "Command Palette",      key: "p", meta: true, shift: true },
+  pinWindow:      { label: "Pin Window on Top",    key: "t", meta: true, shift: true },
+  copyNote:       { label: "Copy Note as Markdown", key: "c", meta: true, shift: true },
+  settings:       { label: "Settings",             key: ",", meta: true },
+};
+
+function loadShortcuts() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("levinote-shortcuts") || "{}");
+    return { ...structuredClone(defaultShortcuts), ...saved };
+  } catch {
+    return structuredClone(defaultShortcuts);
+  }
+}
+
+function saveShortcuts(shortcuts) {
+  const toSave = {};
+  for (const [id, sc] of Object.entries(shortcuts)) {
+    const def = defaultShortcuts[id];
+    if (def && (sc.key !== def.key || !!sc.meta !== !!def.meta || !!sc.shift !== !!def.shift || !!sc.alt !== !!def.alt)) {
+      toSave[id] = { label: sc.label, key: sc.key, meta: !!sc.meta, shift: !!sc.shift, alt: !!sc.alt };
+    }
+  }
+  localStorage.setItem("levinote-shortcuts", JSON.stringify(toSave));
+}
+
+function formatShortcut(sc) {
+  const parts = [];
+  if (sc.meta) parts.push("Cmd");
+  if (sc.alt) parts.push("Alt");
+  if (sc.shift) parts.push("Shift");
+  const keyName = sc.key === " " ? "Space" : sc.key === "," ? "," : sc.key.length === 1 ? sc.key.toUpperCase() : sc.key;
+  parts.push(keyName);
+  return parts.join("+");
+}
+
+function matchesShortcut(e, sc) {
+  const meta = e.metaKey || e.ctrlKey;
+  if (!!sc.meta !== meta) return false;
+  if (!!sc.shift !== e.shiftKey) return false;
+  if (!!sc.alt !== e.altKey) return false;
+  return e.key.toLowerCase() === sc.key.toLowerCase() || e.key === sc.key;
+}
 
 // ─── State ───
 const state = {
@@ -110,6 +170,9 @@ const state = {
   dirty: false,
   paletteMode: null, // null | 'notes' | 'commands'
   selectedPaletteIndex: 0,
+  settingsOpen: false,
+  recordingShortcut: null, // shortcut id being recorded
+  shortcuts: loadShortcuts(),
 };
 
 // ─── DOM refs ───
@@ -129,6 +192,122 @@ const modeIndicator = document.createElement("div");
 modeIndicator.className = "mode-indicator";
 modeIndicator.textContent = "preview";
 document.getElementById("app").appendChild(modeIndicator);
+
+// ─── Settings panel ───
+function createSettingsPanel() {
+  const panel = document.createElement("div");
+  panel.id = "settings-panel";
+  panel.className = "hidden";
+  panel.innerHTML = `
+    <div class="settings-backdrop"></div>
+    <div class="settings-modal">
+      <div class="settings-header">
+        <h2>Settings</h2>
+        <button class="settings-close-btn" title="Close">
+          <svg width="14" height="14" viewBox="0 0 14 14"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="settings-body">
+        <div class="settings-section">
+          <div class="settings-section-title">Keyboard Shortcuts</div>
+          <div class="settings-section-desc">Click any shortcut to rebind it. Press Escape to cancel recording.</div>
+          <div id="shortcuts-list"></div>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById("app").appendChild(panel);
+  panel.querySelector(".settings-backdrop").addEventListener("click", closeSettings);
+  panel.querySelector(".settings-close-btn").addEventListener("click", closeSettings);
+  return panel;
+}
+
+const settingsPanel = createSettingsPanel();
+
+function openSettings() {
+  state.settingsOpen = true;
+  state.recordingShortcut = null;
+  settingsPanel.classList.remove("hidden");
+  renderShortcutsList();
+}
+
+function closeSettings() {
+  state.settingsOpen = false;
+  state.recordingShortcut = null;
+  settingsPanel.classList.add("hidden");
+}
+
+function renderShortcutsList() {
+  const list = document.getElementById("shortcuts-list");
+  list.innerHTML = Object.entries(state.shortcuts)
+    .map(([id, sc]) => {
+      const isRecording = state.recordingShortcut === id;
+      const isModified = (() => {
+        const def = defaultShortcuts[id];
+        return def && (sc.key !== def.key || !!sc.meta !== !!def.meta || !!sc.shift !== !!def.shift || !!sc.alt !== !!def.alt);
+      })();
+      return `
+        <div class="shortcut-row ${isRecording ? "recording" : ""}" data-id="${id}">
+          <span class="shortcut-label">${escapeHtml(sc.label)}</span>
+          <div class="shortcut-keys-area">
+            ${isModified ? `<button class="shortcut-reset-btn" data-id="${id}" title="Reset to default">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2 2v5h5M14 14v-5H9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 6A6 6 0 003.3 3.3L2 7m12 3l-1.3 3.7A6 6 0 012.5 10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>` : ""}
+            <button class="shortcut-key-btn ${isRecording ? "recording" : ""}" data-id="${id}">
+              ${isRecording
+                ? '<span class="recording-pulse"></span>Press keys...'
+                : formatShortcut(sc).split("+").map(k => `<kbd>${escapeHtml(k)}</kbd>`).join('<span class="shortcut-plus">+</span>')}
+            </button>
+          </div>
+        </div>`;
+    })
+    .join("");
+
+  list.querySelectorAll(".shortcut-key-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.recordingShortcut = btn.dataset.id;
+      renderShortcutsList();
+    });
+  });
+
+  list.querySelectorAll(".shortcut-reset-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      state.shortcuts[id] = { ...structuredClone(defaultShortcuts[id]) };
+      saveShortcuts(state.shortcuts);
+      renderShortcutsList();
+    });
+  });
+}
+
+function handleShortcutRecording(e) {
+  if (!state.recordingShortcut) return false;
+  e.preventDefault();
+  e.stopPropagation();
+
+  if (e.key === "Escape") {
+    state.recordingShortcut = null;
+    renderShortcutsList();
+    return true;
+  }
+
+  // Ignore bare modifier keys
+  if (["Meta", "Control", "Alt", "Shift"].includes(e.key)) return true;
+
+  const id = state.recordingShortcut;
+  state.shortcuts[id] = {
+    ...state.shortcuts[id],
+    key: e.key,
+    meta: e.metaKey || e.ctrlKey,
+    shift: e.shiftKey,
+    alt: e.altKey,
+  };
+  saveShortcuts(state.shortcuts);
+  state.recordingShortcut = null;
+  renderShortcutsList();
+  return true;
+}
 
 // ─── Init ───
 async function init() {
@@ -199,6 +378,32 @@ async function deleteCurrentNote() {
   }
 }
 
+// ─── Copy helpers ───
+async function copyToClipboard(text) {
+  await navigator.clipboard.writeText(text);
+}
+
+function showCopyToast(msg = "Copied!") {
+  let toast = document.querySelector(".copy-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.className = "copy-toast";
+    document.getElementById("app").appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.classList.remove("visible");
+  // force reflow
+  void toast.offsetWidth;
+  toast.classList.add("visible");
+  setTimeout(() => toast.classList.remove("visible"), 1600);
+}
+
+function copyNoteMarkdown() {
+  if (!editor.value) return;
+  copyToClipboard(editor.value);
+  showCopyToast("Markdown copied!");
+}
+
 // ─── Render ───
 function renderPreview(content) {
   if (!content || content.trim() === "") {
@@ -206,6 +411,28 @@ function renderPreview(content) {
     return;
   }
   preview.innerHTML = marked.parse(content);
+  setupCodeCopyButtons();
+}
+
+function setupCodeCopyButtons() {
+  preview.querySelectorAll(".code-copy-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const code = btn.getAttribute("data-code")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'");
+      copyToClipboard(code);
+      btn.classList.add("copied");
+      btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.5 3.5 7-7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+      setTimeout(() => {
+        btn.classList.remove("copied");
+        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5" stroke="currentColor" stroke-width="1.3"/></svg>`;
+      }, 1500);
+    });
+  });
 }
 
 function renderNoteList(filter = "") {
@@ -268,30 +495,42 @@ function setMode(mode) {
 }
 
 // ─── Command Palette ───
-const commands = [
-  { label: "New Note", hint: "Cmd+N", action: createNote },
-  { label: "Delete Note", hint: "Cmd+Backspace", action: deleteCurrentNote },
-  {
-    label: "Toggle Edit/Preview",
-    hint: "Cmd+E",
-    action: () => setMode(state.mode === "edit" ? "preview" : "edit"),
-  },
-  {
-    label: "Toggle Sidebar",
-    hint: "Cmd+B",
-    action: () => toggleSidebar(),
-  },
-  {
-    label: "Pin Window on Top",
-    hint: "Cmd+Shift+P",
-    action: () => togglePin(),
-  },
-  {
-    label: "Close Window",
-    hint: "Cmd+W",
-    action: () => getCurrentWindow().hide(),
-  },
-];
+function getCommands() {
+  return [
+    { label: "New Note", hint: formatShortcut(state.shortcuts.newNote), action: createNote },
+    { label: "Delete Note", hint: formatShortcut(state.shortcuts.deleteNote), action: deleteCurrentNote },
+    {
+      label: "Toggle Edit/Preview",
+      hint: formatShortcut(state.shortcuts.toggleEdit),
+      action: () => setMode(state.mode === "edit" ? "preview" : "edit"),
+    },
+    {
+      label: "Toggle Sidebar",
+      hint: formatShortcut(state.shortcuts.toggleSidebar),
+      action: () => toggleSidebar(),
+    },
+    {
+      label: "Pin Window on Top",
+      hint: formatShortcut(state.shortcuts.pinWindow),
+      action: () => togglePin(),
+    },
+    {
+      label: "Copy Note as Markdown",
+      hint: formatShortcut(state.shortcuts.copyNote),
+      action: copyNoteMarkdown,
+    },
+    {
+      label: "Settings",
+      hint: formatShortcut(state.shortcuts.settings),
+      action: openSettings,
+    },
+    {
+      label: "Close Window",
+      hint: formatShortcut(state.shortcuts.closeWindow),
+      action: () => getCurrentWindow().hide(),
+    },
+  ];
+}
 
 function openPalette(mode = "notes") {
   state.paletteMode = mode;
@@ -314,7 +553,7 @@ function renderPalette() {
 
   if (state.paletteMode === "commands" || query.startsWith(">")) {
     const q = query.replace(/^>\s*/, "");
-    items = commands
+    items = getCommands()
       .filter((c) => c.label.toLowerCase().includes(q))
       .map((c) => ({
         label: c.label,
@@ -433,6 +672,7 @@ function setupEventListeners() {
 
   // Titlebar buttons
   document.getElementById("btn-sidebar").addEventListener("click", toggleSidebar);
+  document.getElementById("btn-settings").addEventListener("click", openSettings);
   document.getElementById("btn-pin").addEventListener("click", togglePin);
   document.getElementById("btn-new").addEventListener("click", createNote);
   document.getElementById("btn-close").addEventListener("click", () => getCurrentWindow().hide());
@@ -441,39 +681,36 @@ function setupEventListeners() {
 
   // Global keyboard shortcuts
   document.addEventListener("keydown", (e) => {
-    const meta = e.metaKey || e.ctrlKey;
+    // Shortcut recording intercepts everything
+    if (handleShortcutRecording(e)) return;
 
-    // Command palette
-    if (meta && e.key === "k") {
+    const sc = state.shortcuts;
+
+    if (matchesShortcut(e, sc.openPalette)) {
       e.preventDefault();
-      if (state.paletteMode) {
-        closePalette();
-      } else {
-        openPalette("notes");
-      }
+      state.paletteMode ? closePalette() : openPalette("notes");
       return;
     }
 
-    // Command mode in palette
-    if (meta && e.shiftKey && e.key === "p") {
+    if (matchesShortcut(e, sc.commandPalette)) {
       e.preventDefault();
-      if (!state.paletteMode) {
-        openPalette("commands");
-      } else {
-        togglePin();
-      }
+      state.paletteMode ? closePalette() : openPalette("commands");
       return;
     }
 
-    // New note
-    if (meta && e.key === "n") {
+    if (matchesShortcut(e, sc.settings)) {
+      e.preventDefault();
+      state.settingsOpen ? closeSettings() : openSettings();
+      return;
+    }
+
+    if (matchesShortcut(e, sc.newNote)) {
       e.preventDefault();
       createNote();
       return;
     }
 
-    // Toggle edit/preview
-    if (meta && e.key === "e") {
+    if (matchesShortcut(e, sc.toggleEdit)) {
       e.preventDefault();
       if (state.currentId) {
         if (state.mode === "edit") {
@@ -486,37 +723,47 @@ function setupEventListeners() {
       return;
     }
 
-    // Toggle sidebar
-    if (meta && e.key === "b") {
+    if (matchesShortcut(e, sc.toggleSidebar)) {
       e.preventDefault();
       toggleSidebar();
       return;
     }
 
-    // Save
-    if (meta && e.key === "s") {
+    if (matchesShortcut(e, sc.save)) {
       e.preventDefault();
       saveCurrentNote();
       return;
     }
 
-    // Delete note
-    if (meta && e.key === "Backspace") {
+    if (matchesShortcut(e, sc.deleteNote)) {
       e.preventDefault();
       deleteCurrentNote();
       return;
     }
 
-    // Close
-    if (meta && e.key === "w") {
+    if (matchesShortcut(e, sc.copyNote)) {
+      e.preventDefault();
+      copyNoteMarkdown();
+      return;
+    }
+
+    if (matchesShortcut(e, sc.pinWindow)) {
+      e.preventDefault();
+      togglePin();
+      return;
+    }
+
+    if (matchesShortcut(e, sc.closeWindow)) {
       e.preventDefault();
       getCurrentWindow().hide();
       return;
     }
 
-    // Escape: exit edit mode or close palette
+    // Escape: exit settings, palette, or edit mode
     if (e.key === "Escape") {
-      if (state.paletteMode) {
+      if (state.settingsOpen) {
+        closeSettings();
+      } else if (state.paletteMode) {
         closePalette();
       } else if (state.mode === "edit") {
         setMode("preview");
@@ -524,22 +771,24 @@ function setupEventListeners() {
       return;
     }
 
+    const meta = e.metaKey || e.ctrlKey;
+
     // Enter edit mode when typing (if in preview and no modifier)
     if (
       state.mode === "preview" &&
       state.currentId &&
       !state.paletteMode &&
+      !state.settingsOpen &&
       !meta &&
       !e.altKey &&
       e.key.length === 1
     ) {
       setMode("edit");
       editor.focus();
-      // Let the keypress propagate to the editor
     }
 
     // Navigate notes with arrow keys when not editing
-    if (state.mode === "preview" && !state.paletteMode) {
+    if (state.mode === "preview" && !state.paletteMode && !state.settingsOpen) {
       if (e.key === "ArrowDown" || e.key === "j") {
         e.preventDefault();
         navigateNotes(1);
@@ -550,7 +799,7 @@ function setupEventListeners() {
     }
 
     // Focus search
-    if (e.key === "/" && state.mode === "preview" && !state.paletteMode) {
+    if (e.key === "/" && state.mode === "preview" && !state.paletteMode && !state.settingsOpen) {
       e.preventDefault();
       if (!state.sidebarOpen) toggleSidebar();
       search.focus();
