@@ -1,0 +1,26 @@
+[package]
+name = "levinote"
+version = "0.1.0"
+description = "A minimal markdown note-taking app"
+authors = ["Levi"]
+edition = "2021"
+
+[lib]
+name = "levinote_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs-next = "2"
+raw-window-handle = "0.6"
+window-vibrancy = "0.5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"

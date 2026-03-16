@@ -1,0 +1,41 @@
+# Tauri
+/src-tauri/target/
+/src-tauri/Cargo.lock
+/src-tauri/.cargo/
+/src-tauri/.tauri-build/
+/src-tauri/debug.log
+
+# Rust/tauri artifacts
+**/*.rs.bk
+
+# Build output
+/dist
+/out
+/build
+
+# Lock files
+pnpm-lock.yaml
+yarn.lock
+package-lock.json
+
+# Node modules
+node_modules/
+
+# OS/filesystem
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Env
+.env
+.env.*
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp

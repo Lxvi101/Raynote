@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LeviNote</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="titlebar" data-tauri-drag-region>
+        <div class="titlebar-left">
+          <button id="btn-sidebar" class="titlebar-btn" title="Toggle sidebar (Cmd+B)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <rect x="1" y="2" width="5" height="12" rx="1" stroke="currentColor" stroke-width="1.2"/>
+              <rect x="7" y="2" width="8" height="12" rx="1" stroke="currentColor" stroke-width="1.2"/>
+            </svg>
+          </button>
+          <span class="titlebar-title" id="titlebar-title">LeviNote</span>
+        </div>
+        <div class="titlebar-right">
+          <button id="btn-pin" class="titlebar-btn" title="Pin on top (Cmd+Shift+P)">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M7 1v8M4 3l3-2 3 2M3 13h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button id="btn-minimize" class="titlebar-btn" title="Minimize">
+            <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="1.5" rx=".75" fill="currentColor"/></svg>
+          </button>
+          <button id="btn-close" class="titlebar-btn btn-close" title="Close (Cmd+W)">
+            <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div id="main">
+        <aside id="sidebar" class="open">
+          <div class="sidebar-header">
+            <input type="text" id="search" placeholder="Search notes..." spellcheck="false" />
+            <button id="btn-new" class="sidebar-btn" title="New note (Cmd+N)">
+              <svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+          <ul id="note-list"></ul>
+        </aside>
+
+        <div id="editor-area">
+          <div id="preview" class="visible"></div>
+          <textarea id="editor" spellcheck="false" placeholder="Start writing..."></textarea>
+        </div>
+      </div>
+
+      <div id="command-palette" class="hidden">
+        <div class="palette-backdrop"></div>
+        <div class="palette-modal">
+          <input type="text" id="palette-input" placeholder="Type a command or search notes..." spellcheck="false" />
+          <ul id="palette-results"></ul>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
