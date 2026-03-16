@@ -83,7 +83,7 @@ const codeRenderer = {
       <div class="code-window-titlebar">
         <div class="code-window-dots">
           <span class="dot dot-red"></span>
-          <span class="dot dot-yellow"></span>
+          <span class="dot dot-yellow" role="button" tabindex="0" title="Collapse"></span>
           <span class="dot dot-green"></span>
         </div>
         <span class="code-window-lang">${escapeHtml(displayLang)}</span>
@@ -94,7 +94,9 @@ const codeRenderer = {
           </svg>
         </button>
       </div>
-      <pre><code class="hljs">${highlighted}</code></pre>
+      <div class="code-window-body">
+        <pre><code class="hljs">${highlighted}</code></pre>
+      </div>
     </div>`;
   },
 };
@@ -202,23 +204,81 @@ function createSettingsPanel() {
     <div class="settings-backdrop"></div>
     <div class="settings-modal">
       <div class="settings-header">
-        <h2>Settings</h2>
-        <button class="settings-close-btn" title="Close">
+        <div class="settings-tabs">
+          <button class="settings-tab active" data-tab="general">General</button>
+          <button class="settings-tab" data-tab="shortcuts">Shortcuts</button>
+        </div>
+        <button class="settings-close-btn" title="Close (Esc)">
           <svg width="14" height="14" viewBox="0 0 14 14"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
         </button>
       </div>
       <div class="settings-body">
-        <div class="settings-section">
-          <div class="settings-section-title">Keyboard Shortcuts</div>
-          <div class="settings-section-desc">Click any shortcut to rebind it. Press Escape to cancel recording.</div>
-          <div id="shortcuts-list"></div>
+        <div class="settings-page" data-page="general">
+          <div class="settings-section">
+            <div class="settings-section-title">Appearance</div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-label">Hide from Dock</span>
+                <span class="setting-desc">App stays in the menu bar tray only</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-dock-hide" />
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+            </div>
+          </div>
+          <div class="settings-section">
+            <div class="settings-section-title">System</div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-label">Global Shortcut</span>
+                <span class="setting-desc">Summon LeviNote from anywhere on your Mac</span>
+              </div>
+              <div class="setting-keys">
+                <kbd>Ctrl</kbd><span class="shortcut-plus">+</span><kbd>Cmd</kbd><span class="shortcut-plus">+</span><kbd>Option</kbd><span class="shortcut-plus">+</span><kbd>Shift</kbd><span class="shortcut-plus">+</span><kbd>N</kbd>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-label">Storage</span>
+                <span class="setting-desc">Notes sync via iCloud Drive automatically</span>
+              </div>
+              <span class="setting-badge">iCloud</span>
+            </div>
+          </div>
+        </div>
+        <div class="settings-page hidden" data-page="shortcuts">
+          <div class="settings-section">
+            <div class="settings-section-title">Keyboard Shortcuts</div>
+            <div class="settings-section-desc">Click any shortcut to rebind. Press Escape to cancel.</div>
+            <div id="shortcuts-list"></div>
+          </div>
         </div>
       </div>
     </div>
   `;
   document.getElementById("app").appendChild(panel);
+
   panel.querySelector(".settings-backdrop").addEventListener("click", closeSettings);
   panel.querySelector(".settings-close-btn").addEventListener("click", closeSettings);
+
+  // Tab switching
+  panel.querySelectorAll(".settings-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      panel.querySelectorAll(".settings-tab").forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+      panel.querySelectorAll(".settings-page").forEach((p) => p.classList.add("hidden"));
+      panel.querySelector(`.settings-page[data-page="${tab.dataset.tab}"]`).classList.remove("hidden");
+    });
+  });
+
+  // Dock hide toggle
+  panel.querySelector("#toggle-dock-hide").addEventListener("change", (e) => {
+    const hide = e.target.checked;
+    localStorage.setItem("levinote-hide-dock", hide ? "1" : "0");
+    invoke("set_dock_visible", { visible: !hide });
+  });
+
   return panel;
 }
 
@@ -228,6 +288,9 @@ function openSettings() {
   state.settingsOpen = true;
   state.recordingShortcut = null;
   settingsPanel.classList.remove("hidden");
+  // Restore dock toggle state
+  const dockHidden = localStorage.getItem("levinote-hide-dock") === "1";
+  document.getElementById("toggle-dock-hide").checked = dockHidden;
   renderShortcutsList();
 }
 
@@ -311,6 +374,11 @@ function handleShortcutRecording(e) {
 
 // ─── Init ───
 async function init() {
+  // Restore dock visibility
+  if (localStorage.getItem("levinote-hide-dock") === "1") {
+    invoke("set_dock_visible", { visible: false });
+  }
+
   await loadNotes();
 
   if (state.notes.length > 0) {
@@ -431,6 +499,15 @@ function setupCodeCopyButtons() {
         btn.classList.remove("copied");
         btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5" stroke="currentColor" stroke-width="1.3"/></svg>`;
       }, 1500);
+    });
+  });
+
+  // Collapsible code blocks via yellow dot
+  preview.querySelectorAll(".dot-yellow[role='button']").forEach((dot) => {
+    dot.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const codeWindow = dot.closest(".code-window");
+      codeWindow.classList.toggle("collapsed");
     });
   });
 }

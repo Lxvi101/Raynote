@@ -108,6 +108,21 @@ fn delete_note(id: String) -> bool {
 }
 
 #[tauri::command]
+fn set_dock_visible(visible: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc::{msg_send, sel, sel_impl};
+        unsafe {
+            let app: *mut objc::runtime::Object = msg_send![objc::class!(NSApplication), sharedApplication];
+            // 0 = NSApplicationActivationPolicyRegular (show in dock)
+            // 1 = NSApplicationActivationPolicyAccessory (hide from dock)
+            let policy: i64 = if visible { 0 } else { 1 };
+            let _: () = msg_send![app, setActivationPolicy: policy];
+        }
+    }
+}
+
+#[tauri::command]
 fn rename_note(old_id: String, new_id: String) -> bool {
     let old_path = notes_dir().join(format!("{}.md", old_id));
     let new_path = notes_dir().join(format!("{}.md", new_id));
@@ -139,9 +154,12 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // Register global shortcut: Cmd+Shift+N
+            // Register global shortcut: Ctrl+Cmd+Option+Shift+N
             use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
-            let shortcut = Shortcut::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyN);
+            let shortcut = Shortcut::new(
+                Some(Modifiers::CONTROL | Modifiers::META | Modifiers::ALT | Modifiers::SHIFT),
+                Code::KeyN,
+            );
             app.global_shortcut().register(shortcut)?;
 
             // Get the main window
@@ -213,6 +231,7 @@ pub fn run() {
             save_note,
             delete_note,
             rename_note,
+            set_dock_visible,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LeviNote");
