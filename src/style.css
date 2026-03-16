@@ -390,7 +390,77 @@ html, body {
   color: #c4b5fd;
 }
 
-#preview pre {
+/* ─── macOS Code Window ─── */
+.code-window {
+  margin: 20px 0;
+  border-radius: 10px;
+  background: #1c1e26;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35),
+              0 2px 8px rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+
+.code-window-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.code-window-dots {
+  display: flex;
+  gap: 7px;
+}
+
+.dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+}
+
+.dot-red { background: #ff5f57; }
+.dot-yellow { background: #febc2e; }
+.dot-green { background: #28c840; }
+
+.code-window-lang {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.32);
+  letter-spacing: 0.03em;
+  margin-left: auto;
+  text-transform: lowercase;
+}
+
+.code-window pre {
+  margin: 0;
+  padding: 16px 18px;
+  background: transparent;
+  border: none;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.code-window pre::-webkit-scrollbar {
+  display: none;
+}
+
+.code-window pre code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.65;
+  background: none;
+  padding: 0;
+  color: inherit;
+  border-radius: 0;
+}
+
+/* Fallback for any pre not inside code-window */
+#preview pre:not(.code-window pre) {
   margin: 16px 0;
   padding: 16px;
   background: rgba(0, 0, 0, 0.3);
@@ -400,16 +470,55 @@ html, body {
   scrollbar-width: none;
 }
 
-#preview pre::-webkit-scrollbar {
+#preview pre:not(.code-window pre)::-webkit-scrollbar {
   display: none;
 }
 
-#preview pre code {
+#preview pre:not(.code-window pre) code {
   background: none;
   padding: 0;
   font-size: 13px;
   line-height: 1.6;
   color: rgba(255, 255, 255, 0.78);
+}
+
+/* ─── LaTeX Widget ─── */
+.latex-widget {
+  margin: 20px 0;
+  padding: 20px 24px;
+  background: #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25),
+              0 1px 4px rgba(0, 0, 0, 0.15);
+  overflow-x: auto;
+  scrollbar-width: none;
+  text-align: center;
+}
+
+.latex-widget::-webkit-scrollbar {
+  display: none;
+}
+
+.latex-widget .katex {
+  font-size: 1.15em;
+  color: #1a1a2e;
+}
+
+.latex-widget.latex-error {
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  text-align: left;
+}
+
+/* Inline LaTeX */
+#preview .katex {
+  font-size: 1em;
+}
+
+#preview p .katex,
+#preview li .katex {
+  vertical-align: -0.15em;
 }
 
 #preview hr {

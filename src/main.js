@@ -2,9 +2,99 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { marked } from "marked";
+import hljs from "highlight.js";
+import "highlight.js/styles/github-dark-dimmed.min.css";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import "./style.css";
 
+// ─── Utilities (hoisted for use in extensions) ───
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ─── LaTeX extension for marked ───
+const latexBlock = {
+  name: "latexBlock",
+  level: "block",
+  start(src) {
+    return src.match(/\$\$/)?.index;
+  },
+  tokenizer(src) {
+    const match = src.match(/^\$\$([\s\S]+?)\$\$/);
+    if (match) {
+      return { type: "latexBlock", raw: match[0], text: match[1].trim() };
+    }
+  },
+  renderer(token) {
+    try {
+      const html = katex.renderToString(token.text, {
+        displayMode: true,
+        throwOnError: false,
+        trust: true,
+      });
+      return `<div class="latex-widget">${html}</div>`;
+    } catch {
+      return `<div class="latex-widget latex-error">${escapeHtml(token.text)}</div>`;
+    }
+  },
+};
+
+const latexInline = {
+  name: "latexInline",
+  level: "inline",
+  start(src) {
+    return src.match(/\$/)?.index;
+  },
+  tokenizer(src) {
+    const match = src.match(/^\$([^\$\n]+?)\$/);
+    if (match) {
+      return { type: "latexInline", raw: match[0], text: match[1].trim() };
+    }
+  },
+  renderer(token) {
+    try {
+      return katex.renderToString(token.text, {
+        displayMode: false,
+        throwOnError: false,
+        trust: true,
+      });
+    } catch {
+      return `<code class="latex-error">${escapeHtml(token.text)}</code>`;
+    }
+  },
+};
+
+// ─── Custom code block renderer ───
+const renderer = {
+  code(token) {
+    const lang = token.lang || "";
+    const displayLang = lang || "plain";
+    let highlighted;
+    if (lang && hljs.getLanguage(lang)) {
+      highlighted = hljs.highlight(token.text, { language: lang }).value;
+    } else {
+      highlighted = hljs.highlightAuto(token.text).value;
+    }
+    return `<div class="code-window">
+      <div class="code-window-titlebar">
+        <div class="code-window-dots">
+          <span class="dot dot-red"></span>
+          <span class="dot dot-yellow"></span>
+          <span class="dot dot-green"></span>
+        </div>
+        <span class="code-window-lang">${escapeHtml(displayLang)}</span>
+      </div>
+      <pre><code class="hljs">${highlighted}</code></pre>
+    </div>`;
+  },
+};
+
 // ─── Configure marked ───
+marked.use({ extensions: [latexBlock, latexInline] });
+marked.use({ renderer });
 marked.setOptions({
   breaks: true,
   gfm: true,
@@ -503,12 +593,6 @@ function setupTauriListeners() {
 }
 
 // ─── Utilities ───
-function escapeHtml(str) {
-  const div = document.createElement("div");
-  div.textContent = str;
-  return div.innerHTML;
-}
-
 function formatDate(timestamp) {
   if (!timestamp) return "";
   const date = new Date(timestamp * 1000);
