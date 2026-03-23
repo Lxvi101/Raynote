@@ -142,11 +142,20 @@ pub fn run() {
                 .with_handler(|app, shortcut, event| {
                     if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
                         let shortcut_str = shortcut.to_string();
-                        if shortcut_str.contains("N") {
-                            if let Some(window) = app.get_webview_window("main") {
+                        if let Some(window) = app.get_webview_window("main") {
+                            if shortcut_str.contains("N") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
                                 let _ = window.emit("quick-capture", ());
+                            } else if shortcut_str.contains("M") {
+                                if window.is_visible().unwrap_or(false)
+                                    && window.is_focused().unwrap_or(false)
+                                {
+                                    let _ = window.hide();
+                                } else {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
                             }
                         }
                     }
@@ -161,6 +170,13 @@ pub fn run() {
                 Code::KeyN,
             );
             app.global_shortcut().register(shortcut)?;
+
+            // Register global shortcut: Ctrl+Cmd+Option+Shift+M (toggle window)
+            let toggle_shortcut = Shortcut::new(
+                Some(Modifiers::CONTROL | Modifiers::META | Modifiers::ALT | Modifiers::SHIFT),
+                Code::KeyM,
+            );
+            app.global_shortcut().register(toggle_shortcut)?;
 
             // Get the main window
             let win = app.get_webview_window("main").unwrap();

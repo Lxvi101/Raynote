@@ -67,19 +67,14 @@ const latexInline = {
   },
 };
 
-// ─── Custom code block renderer ───
+// ─── Custom code block renderer (lazy highlighting) ───
 const codeRenderer = {
   code(token) {
     const lang = token.lang || "";
     const displayLang = lang || "plain";
-    let highlighted;
-    if (lang && hljs.getLanguage(lang)) {
-      highlighted = hljs.highlight(token.text, { language: lang }).value;
-    } else {
-      highlighted = hljs.highlightAuto(token.text).value;
-    }
     const escaped = escapeHtml(token.text).replace(/"/g, "&quot;");
-    return `<div class="code-window">
+    // Render unhighlighted first; highlight lazily via IntersectionObserver
+    return `<div class="code-window" data-lang="${escapeHtml(lang)}" data-highlight="pending">
       <div class="code-window-titlebar">
         <div class="code-window-dots">
           <span class="dot dot-red"></span>
@@ -95,7 +90,7 @@ const codeRenderer = {
         </button>
       </div>
       <div class="code-window-body">
-        <pre><code class="hljs">${highlighted}</code></pre>
+        <pre><code class="hljs">${escapeHtml(token.text)}</code></pre>
       </div>
     </div>`;
   },
@@ -112,7 +107,7 @@ marked.setOptions({
 // ─── Shortcuts system ───
 const defaultShortcuts = {
   newNote:        { label: "New Note",             key: "n", meta: true },
-  deleteNote:     { label: "Delete Note",          key: "Backspace", meta: true },
+  deleteNote:     { label: "Delete Note",          key: "Backspace", meta: true, shift: true },
   toggleEdit:     { label: "Toggle Edit/Preview",  key: "e", meta: true },
   toggleSidebar:  { label: "Toggle Sidebar",       key: "b", meta: true },
   save:           { label: "Save Note",            key: "s", meta: true },
@@ -121,6 +116,7 @@ const defaultShortcuts = {
   commandPalette: { label: "Command Palette",      key: "p", meta: true, shift: true },
   pinWindow:      { label: "Pin Window on Top",    key: "t", meta: true, shift: true },
   copyNote:       { label: "Copy Note as Markdown", key: "c", meta: true, shift: true },
+  undoDelete:     { label: "Undo Delete Note",     key: "Tab", meta: true, shift: true },
   settings:       { label: "Settings",             key: ",", meta: true },
 };
 
@@ -430,8 +426,12 @@ async function createNote() {
   editor.focus();
 }
 
+const deletedNotesStack = [];
+
 async function deleteCurrentNote() {
   if (!state.currentId) return;
+  const content = await invoke("read_note", { id: state.currentId });
+  deletedNotesStack.push({ id: state.currentId, content });
   await invoke("delete_note", { id: state.currentId });
   state.currentId = null;
   state.dirty = false;
@@ -444,6 +444,14 @@ async function deleteCurrentNote() {
     preview.innerHTML = "";
     showEmptyState();
   }
+}
+
+async function undoDeleteNote() {
+  if (deletedNotesStack.length === 0) return;
+  const { id, content } = deletedNotesStack.pop();
+  await invoke("save_note", { id, content });
+  await loadNotes();
+  await selectNote(id);
 }
 
 // ─── Copy helpers ───
@@ -473,13 +481,48 @@ function copyNoteMarkdown() {
 }
 
 // ─── Render ───
+let codeObserver = null;
+
 function renderPreview(content) {
   if (!content || content.trim() === "") {
     preview.innerHTML = '<div class="empty-state">Start writing...</div>';
     return;
   }
+  // Clean up previous observer
+  if (codeObserver) {
+    codeObserver.disconnect();
+    codeObserver = null;
+  }
   preview.innerHTML = marked.parse(content);
   setupCodeCopyButtons();
+  lazyHighlightCodeBlocks();
+}
+
+function lazyHighlightCodeBlocks() {
+  const pending = preview.querySelectorAll('.code-window[data-highlight="pending"]');
+  if (pending.length === 0) return;
+
+  codeObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const block = entry.target;
+        codeObserver.unobserve(block);
+        const lang = block.dataset.lang;
+        const codeEl = block.querySelector("code");
+        const raw = codeEl.textContent;
+        if (lang && hljs.getLanguage(lang)) {
+          codeEl.innerHTML = hljs.highlight(raw, { language: lang }).value;
+        } else {
+          codeEl.innerHTML = hljs.highlightAuto(raw).value;
+        }
+        block.dataset.highlight = "done";
+      }
+    },
+    { root: preview, rootMargin: "200px" }
+  );
+
+  pending.forEach((block) => codeObserver.observe(block));
 }
 
 function setupCodeCopyButtons() {
@@ -576,6 +619,7 @@ function getCommands() {
   return [
     { label: "New Note", hint: formatShortcut(state.shortcuts.newNote), action: createNote },
     { label: "Delete Note", hint: formatShortcut(state.shortcuts.deleteNote), action: deleteCurrentNote },
+    { label: "Undo Delete Note", hint: formatShortcut(state.shortcuts.undoDelete), action: undoDeleteNote },
     {
       label: "Toggle Edit/Preview",
       hint: formatShortcut(state.shortcuts.toggleEdit),
@@ -815,6 +859,12 @@ function setupEventListeners() {
     if (matchesShortcut(e, sc.deleteNote)) {
       e.preventDefault();
       deleteCurrentNote();
+      return;
+    }
+
+    if (matchesShortcut(e, sc.undoDelete)) {
+      e.preventDefault();
+      undoDeleteNote();
       return;
     }
 
