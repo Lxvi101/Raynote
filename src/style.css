@@ -588,9 +588,43 @@ html, body {
   font-weight: 500;
 }
 
+/* ─── Todo Checkboxes ─── */
 #preview input[type="checkbox"] {
   margin-right: 8px;
   accent-color: var(--accent);
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
+}
+
+#preview .todo-item {
+  list-style: none;
+  padding: 4px 8px;
+  margin: 2px -8px;
+  border-radius: 6px;
+  transition: background var(--transition);
+  cursor: pointer;
+  outline: none;
+}
+
+#preview .todo-item:hover {
+  background: var(--surface-hover);
+}
+
+#preview .todo-item:focus-visible {
+  background: var(--surface-active);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+#preview .todo-item input[type="checkbox"]:checked + span,
+#preview .todo-item:has(input:checked) {
+  color: var(--text-dim);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-dim);
 }
 
 .empty-state {
@@ -1219,4 +1253,95 @@ button:focus-visible {
 
 .fade-in {
   animation: fadeIn 300ms ease;
+}
+
+/* ─── Drop Zone ─── */
+#editor-area.drop-active {
+  position: relative;
+}
+
+#editor-area.drop-active::after {
+  content: "Drop files here";
+  position: absolute;
+  inset: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  background: rgba(124, 111, 247, 0.06);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  z-index: 20;
+  pointer-events: none;
+  animation: fadeIn 150ms ease;
+}
+
+/* ─── Lazy Asset Images ─── */
+.lazy-image {
+  margin: 16px 0;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.lazy-image-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px 16px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.lazy-image-placeholder svg {
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
+.lazy-image.loaded {
+  background: transparent;
+  border-color: transparent;
+}
+
+.lazy-image .asset-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+}
+
+.lazy-image.error .lazy-image-placeholder {
+  color: var(--danger);
+}
+
+/* ─── Asset File Links ─── */
+.asset-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--accent) !important;
+  font-size: 13px;
+  font-weight: 450;
+  text-decoration: none !important;
+  transition: all var(--transition);
+  cursor: pointer;
+  border-bottom: none !important;
+}
+
+.asset-link:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-focus);
+}
+
+.asset-link svg {
+  flex-shrink: 0;
 }

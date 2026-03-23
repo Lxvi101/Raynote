@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -120,6 +121,71 @@ fn set_dock_visible(visible: bool) {
             let _: () = msg_send![app, setActivationPolicy: policy];
         }
     }
+}
+
+#[tauri::command]
+fn save_asset(name: String, data_base64: String) -> Result<String, String> {
+    let dir = notes_dir().join("assets");
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    let data = general_purpose::STANDARD
+        .decode(&data_base64)
+        .map_err(|e| e.to_string())?;
+    let path = dir.join(&name);
+    fs::write(&path, &data).map_err(|e| e.to_string())?;
+    Ok(name)
+}
+
+#[tauri::command]
+fn read_asset(name: String) -> Result<String, String> {
+    let path = notes_dir().join("assets").join(&name);
+    let data = fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(general_purpose::STANDARD.encode(&data))
+}
+
+#[tauri::command]
+fn reveal_asset(name: String) -> Result<(), String> {
+    let path = notes_dir().join("assets").join(&name);
+    if !path.exists() {
+        return Err("Asset not found".into());
+    }
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn copy_to_assets(source_path: String) -> Result<(String, String), String> {
+    let source = std::path::Path::new(&source_path);
+    if !source.exists() {
+        return Err("Source file not found".into());
+    }
+    let original_name = source
+        .file_name()
+        .ok_or("Invalid filename")?
+        .to_string_lossy()
+        .to_string();
+    let safe_name = original_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect::<String>();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let asset_name = format!("{}-{}", ts, safe_name);
+
+    let dir = notes_dir().join("assets");
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    let dest = dir.join(&asset_name);
+    fs::copy(source, &dest).map_err(|e| e.to_string())?;
+    Ok((asset_name, original_name))
 }
 
 #[tauri::command]
@@ -248,6 +314,10 @@ pub fn run() {
             delete_note,
             rename_note,
             set_dock_visible,
+            save_asset,
+            read_asset,
+            copy_to_assets,
+            reveal_asset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LeviNote");

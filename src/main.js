@@ -67,6 +67,71 @@ const latexInline = {
   },
 };
 
+// ─── Custom image renderer (lazy asset loading + width + align) ───
+// Format: ![alt|50%|right](src) — pipe-separated, defaults to 100% center
+function parseImageAlt(raw) {
+  const parts = (raw || "").split("|").map((s) => s.trim());
+  const alt = parts[0];
+  let width = "100%";
+  let align = "center";
+  for (let i = 1; i < parts.length; i++) {
+    const p = parts[i];
+    if (/^\d+%$/.test(p)) width = p;
+    else if (/^(left|center|right)$/i.test(p)) align = p.toLowerCase();
+  }
+  return { alt, width, align };
+}
+
+function imageAlignStyle(width, align) {
+  const margin =
+    align === "left" ? "0 auto 0 0" :
+    align === "right" ? "0 0 0 auto" :
+    "0 auto";
+  return `width:${width};margin:${margin};display:block`;
+}
+
+const imageRenderer = {
+  image(token) {
+    const src = token.href || "";
+    const { alt, width, align } = parseImageAlt(token.text || "");
+    const style = imageAlignStyle(width, align);
+    if (src.startsWith("asset:")) {
+      const assetName = src.slice(6);
+      return `<div class="lazy-image" data-asset="${escapeHtml(assetName)}" style="${style}">
+        <div class="lazy-image-placeholder">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="1.5"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="1.5"/><path d="M3 16l5-5 4 4 3-3 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>${escapeHtml(alt) || escapeHtml(assetName)}</span>
+        </div>
+      </div>`;
+    }
+    const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
+    return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" style="${style}"${title} loading="lazy">`;
+  },
+};
+
+// ─── Custom link renderer (asset file links) ───
+const assetLinkRenderer = {
+  link(token) {
+    const href = token.href || "";
+    if (href.startsWith("asset:")) {
+      const assetName = href.slice(6);
+      const ext = assetName.split(".").pop().toLowerCase();
+      let icon;
+      if (ext === "pdf") {
+        icon = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 1h6l4 4v9a2 2 0 01-2 2H4a2 2 0 01-2-2V3a2 2 0 012-2z" stroke="currentColor" stroke-width="1.3"/><path d="M10 1v4h4" stroke="currentColor" stroke-width="1.3"/></svg>`;
+      } else if (/^(mp4|mov|webm|avi|mkv)$/.test(ext)) {
+        icon = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="1" y="3" width="14" height="10" rx="2" stroke="currentColor" stroke-width="1.3"/><path d="M6.5 6.5l3.5 2-3.5 2v-4z" fill="currentColor"/></svg>`;
+      } else {
+        icon = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 1h6l4 4v9a2 2 0 01-2 2H4a2 2 0 01-2-2V3a2 2 0 012-2z" stroke="currentColor" stroke-width="1.3"/><path d="M10 1v4h4" stroke="currentColor" stroke-width="1.3"/></svg>`;
+      }
+      const text = escapeHtml(token.text || assetName);
+      return `<a class="asset-link" data-asset="${escapeHtml(assetName)}" href="#">${icon} ${text}</a>`;
+    }
+    // Return false to fall back to default rendering
+    return false;
+  },
+};
+
 // ─── Custom code block renderer (lazy highlighting) ───
 const codeRenderer = {
   code(token) {
@@ -98,7 +163,7 @@ const codeRenderer = {
 
 // ─── Configure marked ───
 marked.use({ extensions: [latexBlock, latexInline] });
-marked.use({ renderer: codeRenderer });
+marked.use({ renderer: { ...codeRenderer, ...imageRenderer, ...assetLinkRenderer } });
 marked.setOptions({
   breaks: true,
   gfm: true,
@@ -496,6 +561,8 @@ function renderPreview(content) {
   preview.innerHTML = marked.parse(content);
   setupCodeCopyButtons();
   lazyHighlightCodeBlocks();
+  lazyLoadAssetImages();
+  setupTodoCheckboxes();
 }
 
 function lazyHighlightCodeBlocks() {
@@ -553,6 +620,198 @@ function setupCodeCopyButtons() {
       codeWindow.classList.toggle("collapsed");
     });
   });
+}
+
+// ─── Lazy asset image loading ───
+let imageObserver = null;
+const blobCache = new Map();
+
+function lazyLoadAssetImages() {
+  const pending = preview.querySelectorAll(".lazy-image[data-asset]");
+  if (pending.length === 0) return;
+
+  if (imageObserver) {
+    imageObserver.disconnect();
+    imageObserver = null;
+  }
+
+  imageObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const el = entry.target;
+        imageObserver.unobserve(el);
+        const assetName = el.dataset.asset;
+        loadAssetImage(el, assetName);
+      }
+    },
+    { root: preview, rootMargin: "200px" }
+  );
+
+  pending.forEach((el) => imageObserver.observe(el));
+}
+
+async function loadAssetImage(container, assetName) {
+  try {
+    let blobUrl = blobCache.get(assetName);
+    if (!blobUrl) {
+      const base64 = await invoke("read_asset", { name: assetName });
+      const ext = assetName.split(".").pop().toLowerCase();
+      const mimeMap = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
+      const mime = mimeMap[ext] || "image/png";
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: mime });
+      blobUrl = URL.createObjectURL(blob);
+      blobCache.set(assetName, blobUrl);
+    }
+    const img = document.createElement("img");
+    img.src = blobUrl;
+    img.alt = assetName;
+    img.className = "asset-image";
+    container.innerHTML = "";
+    container.appendChild(img);
+    container.classList.add("loaded");
+  } catch {
+    container.querySelector(".lazy-image-placeholder span").textContent = "Failed to load image";
+    container.classList.add("error");
+  }
+}
+
+// ─── Asset link click handler ───
+function setupAssetLinkClicks() {
+  preview.querySelectorAll(".asset-link[data-asset]").forEach((link) => {
+    link.addEventListener("click", async (e) => {
+      e.preventDefault();
+      const assetName = link.dataset.asset;
+      try {
+        await invoke("reveal_asset", { name: assetName });
+      } catch {
+        showCopyToast("Failed to open file");
+      }
+    });
+  });
+}
+
+// ─── Todo checkboxes ───
+function setupTodoCheckboxes() {
+  const checkboxes = preview.querySelectorAll('input[type="checkbox"]');
+  if (checkboxes.length === 0) return;
+
+  checkboxes.forEach((cb, index) => {
+    cb.removeAttribute("disabled");
+    cb.dataset.todoIndex = index;
+    const li = cb.closest("li");
+    if (li) {
+      li.classList.add("todo-item");
+      li.dataset.todoIndex = index;
+      li.setAttribute("tabindex", "0");
+    }
+
+    cb.addEventListener("change", () => {
+      toggleTodoInMarkdown(index, cb.checked);
+    });
+  });
+
+  // Make li click toggle the checkbox too (but not when clicking the checkbox itself)
+  preview.querySelectorAll(".todo-item").forEach((li) => {
+    li.addEventListener("keydown", (e) => {
+      if (e.key === " " || e.key === "Enter") {
+        e.preventDefault();
+        const cb = li.querySelector('input[type="checkbox"]');
+        if (cb) {
+          cb.checked = !cb.checked;
+          cb.dispatchEvent(new Event("change"));
+        }
+      }
+    });
+  });
+
+  setupAssetLinkClicks();
+}
+
+function toggleTodoInMarkdown(index, checked) {
+  const content = editor.value;
+  const todoPattern = /^(\s*[-*+]\s*)\[([ xX])\]/gm;
+  let match;
+  let count = 0;
+
+  while ((match = todoPattern.exec(content)) !== null) {
+    if (count === index) {
+      const newMark = checked ? "x" : " ";
+      const before = content.slice(0, match.index + match[1].length + 1);
+      const after = content.slice(match.index + match[1].length + 2);
+      editor.value = before + newMark + after;
+      state.dirty = true;
+      saveCurrentNote();
+      return;
+    }
+    count++;
+  }
+}
+
+// ─── Drag & drop file handling (uses Tauri native events) ───
+const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
+
+function setupDropHandler() {
+  const editorArea = document.getElementById("editor-area");
+
+  getCurrentWindow().onDragDropEvent((event) => {
+    const { type } = event.payload;
+
+    if (type === "enter" || type === "over") {
+      editorArea.classList.add("drop-active");
+    } else if (type === "leave") {
+      editorArea.classList.remove("drop-active");
+    } else if (type === "drop") {
+      editorArea.classList.remove("drop-active");
+      const paths = event.payload.paths || [];
+      if (paths.length > 0) handleDroppedPaths(paths);
+    }
+  });
+}
+
+async function handleDroppedPaths(paths) {
+  if (!state.currentId) return;
+
+  // Switch to edit mode if needed
+  if (state.mode !== "edit") {
+    setMode("edit");
+    editor.focus();
+  }
+
+  for (const filePath of paths) {
+    try {
+      const [assetName, originalName] = await invoke("copy_to_assets", { sourcePath: filePath });
+
+      let markdown;
+      if (IMAGE_EXTS.test(originalName)) {
+        markdown = `![${originalName}|100%|center](asset:${assetName})`;
+      } else {
+        markdown = `[${originalName}](asset:${assetName})`;
+      }
+
+      insertAtCursor(markdown + "\n");
+      showCopyToast("File attached");
+    } catch {
+      showCopyToast("Failed to attach file");
+    }
+  }
+}
+
+function insertAtCursor(text) {
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const before = editor.value.substring(0, start);
+  const after = editor.value.substring(end);
+  // Ensure we're on a new line
+  const needsNewline = before.length > 0 && !before.endsWith("\n");
+  const insert = (needsNewline ? "\n" : "") + text;
+  editor.value = before + insert + after;
+  editor.selectionStart = editor.selectionEnd = start + insert.length;
+  state.dirty = true;
+  saveCurrentNote();
 }
 
 function renderNoteList(filter = "") {
@@ -800,6 +1059,9 @@ function setupEventListeners() {
   document.getElementById("btn-minimize").addEventListener("click", () => getCurrentWindow().minimize());
 
 
+  // Drag & drop
+  setupDropHandler();
+
   // Global keyboard shortcuts
   document.addEventListener("keydown", (e) => {
     // Shortcut recording intercepts everything
@@ -925,6 +1187,28 @@ function setupEventListeners() {
       }
     }
 
+    // Todo keyboard navigation in preview mode
+    if (state.mode === "preview" && !state.paletteMode && !state.settingsOpen) {
+      const todos = preview.querySelectorAll(".todo-item");
+      if (todos.length > 0) {
+        const focused = document.activeElement?.closest(".todo-item");
+        if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+          e.preventDefault();
+          const items = Array.from(todos);
+          if (!focused) {
+            items[e.shiftKey ? items.length - 1 : 0].focus();
+          } else {
+            const idx = items.indexOf(focused);
+            const next = e.shiftKey ? idx - 1 : idx + 1;
+            if (next >= 0 && next < items.length) {
+              items[next].focus();
+            }
+          }
+          return;
+        }
+      }
+    }
+
     // Focus search
     if (e.key === "/" && state.mode === "preview" && !state.paletteMode && !state.settingsOpen) {
       e.preventDefault();
@@ -933,7 +1217,7 @@ function setupEventListeners() {
     }
   });
 
-  // Tab handling in editor
+  // Tab handling and line duplicate in editor
   editor.addEventListener("keydown", (e) => {
     if (e.key === "Tab") {
       e.preventDefault();
@@ -942,6 +1226,29 @@ function setupEventListeners() {
       editor.value =
         editor.value.substring(0, start) + "  " + editor.value.substring(end);
       editor.selectionStart = editor.selectionEnd = start + 2;
+      state.dirty = true;
+    }
+
+    // Option+Arrow: duplicate line up/down
+    if (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp") && e.shiftKey) {
+      e.preventDefault();
+      const val = editor.value;
+      const cursor = editor.selectionStart;
+      const selEnd = editor.selectionEnd;
+      const lineStart = val.lastIndexOf("\n", cursor - 1) + 1;
+      const lineEnd = val.indexOf("\n", selEnd);
+      const end = lineEnd === -1 ? val.length : lineEnd;
+      const line = val.slice(lineStart, end);
+
+      if (e.key === "ArrowDown") {
+        editor.value = val.slice(0, end) + "\n" + line + val.slice(end);
+        editor.selectionStart = cursor + line.length + 1;
+        editor.selectionEnd = selEnd + line.length + 1;
+      } else {
+        editor.value = val.slice(0, lineStart) + line + "\n" + val.slice(lineStart);
+        editor.selectionStart = cursor;
+        editor.selectionEnd = selEnd;
+      }
       state.dirty = true;
     }
   });
