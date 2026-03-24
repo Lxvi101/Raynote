@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import "highlight.js/styles/github-dark-dimmed.min.css";
@@ -109,7 +110,7 @@ const imageRenderer = {
   },
 };
 
-// ─── Custom link renderer (asset file links) ───
+// ─── Custom link renderer (asset file links + external links) ───
 const assetLinkRenderer = {
   link(token) {
     const href = token.href || "";
@@ -127,8 +128,11 @@ const assetLinkRenderer = {
       const text = escapeHtml(token.text || assetName);
       return `<a class="asset-link" data-asset="${escapeHtml(assetName)}" href="#">${icon} ${text}</a>`;
     }
-    // Return false to fall back to default rendering
-    return false;
+    // Render all other links with a data attribute so we can open them externally
+    const url = escapeHtml(href);
+    const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
+    const label = token.tokens ? this.parser.parseInline(token.tokens) : escapeHtml(token.text || href);
+    return `<a class="external-link" href="#" data-url="${url}"${title}>${label}</a>`;
   },
 };
 
@@ -563,6 +567,8 @@ function renderPreview(content) {
   lazyHighlightCodeBlocks();
   lazyLoadAssetImages();
   setupTodoCheckboxes();
+  setupAssetLinkClicks();
+  setupExternalLinkClicks();
 }
 
 function lazyHighlightCodeBlocks() {
@@ -694,6 +700,21 @@ function setupAssetLinkClicks() {
   });
 }
 
+// ─── External link click handler (open in default browser) ───
+function setupExternalLinkClicks() {
+  preview.querySelectorAll(".external-link[data-url]").forEach((link) => {
+    link.addEventListener("click", async (e) => {
+      e.preventDefault();
+      const url = link.dataset.url;
+      try {
+        await shellOpen(url);
+      } catch {
+        showCopyToast("Failed to open link");
+      }
+    });
+  });
+}
+
 // ─── Todo checkboxes ───
 function setupTodoCheckboxes() {
   const checkboxes = preview.querySelectorAll('input[type="checkbox"]');
@@ -728,7 +749,6 @@ function setupTodoCheckboxes() {
     });
   });
 
-  setupAssetLinkClicks();
 }
 
 function toggleTodoInMarkdown(index, checked) {
@@ -1061,6 +1081,42 @@ function setupEventListeners() {
 
   // Drag & drop
   setupDropHandler();
+
+  // ─── Block web-app behaviors to feel native ───
+  // Prevent right-click context menu (except in text inputs)
+  document.addEventListener("contextmenu", (e) => {
+    if (!e.target.closest("textarea, input")) e.preventDefault();
+  });
+
+  // Block refresh, devtools, and other browser-revealing shortcuts
+  document.addEventListener("keydown", (e) => {
+    const meta = e.metaKey || e.ctrlKey;
+    // F5 / Cmd+R / Ctrl+R — refresh
+    if (e.key === "F5" || (meta && e.key === "r")) {
+      e.preventDefault();
+      return;
+    }
+    // Cmd+Shift+R / Ctrl+Shift+R — hard refresh
+    if (meta && e.shiftKey && e.key === "R") {
+      e.preventDefault();
+      return;
+    }
+    // Cmd+Option+I / Ctrl+Shift+I — devtools
+    if ((e.metaKey && e.altKey && e.key === "i") || (e.ctrlKey && e.shiftKey && e.key === "I")) {
+      e.preventDefault();
+      return;
+    }
+    // Cmd+Option+J — devtools console
+    if (e.metaKey && e.altKey && e.key === "j") {
+      e.preventDefault();
+      return;
+    }
+    // Cmd+Option+U / Ctrl+U — view source
+    if ((e.metaKey && e.altKey && e.key === "u") || (e.ctrlKey && e.key === "u")) {
+      e.preventDefault();
+      return;
+    }
+  }, true); // capture phase to intercept before anything else
 
   // Global keyboard shortcuts
   document.addEventListener("keydown", (e) => {
