@@ -4,7 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager,
+    webview::{WebviewWindow, WebviewWindowBuilder},
+    Emitter, Manager, WebviewUrl,
 };
 
 fn notes_dir() -> PathBuf {
@@ -199,6 +200,72 @@ fn rename_note(old_id: String, new_id: String) -> bool {
     }
 }
 
+fn apply_glass_effects(win: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        window_vibrancy::apply_vibrancy(
+            win,
+            window_vibrancy::NSVisualEffectMaterial::HudWindow,
+            Some(window_vibrancy::NSVisualEffectState::Active),
+            Some(12.0),
+        )
+        .expect("Failed to apply macOS vibrancy");
+
+        use objc::{msg_send, sel, sel_impl};
+        use raw_window_handle::HasWindowHandle;
+
+        if let Ok(handle) = win.window_handle() {
+            match handle.as_raw() {
+                raw_window_handle::RawWindowHandle::AppKit(appkit) => unsafe {
+                    let ns_view = appkit.ns_view.as_ptr() as *mut objc::runtime::Object;
+                    let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
+                    let content_view: *mut objc::runtime::Object =
+                        msg_send![ns_window, contentView];
+                    let () = msg_send![content_view, setWantsLayer: true];
+                    let layer: *mut objc::runtime::Object = msg_send![content_view, layer];
+                    let () = msg_send![layer, setCornerRadius: 12.0_f64];
+                    let () = msg_send![layer, setMasksToBounds: true];
+                },
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    window_vibrancy::apply_blur(win, Some((18, 18, 24, 125))).expect("Failed to apply Windows blur");
+}
+
+#[tauri::command]
+fn create_sticky_window(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let path = notes_dir().join(format!("{}.md", id));
+    if !path.is_file() {
+        return Err("Note not found".into());
+    }
+
+    let window_label = format!(
+        "sticky-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+
+    let url = format!("index.html?sticky=1&id={}", id);
+    let win = WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App(url.into()))
+        .title("Sticky")
+        .inner_size(320.0, 440.0)
+        .min_inner_size(220.0, 200.0)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    apply_glass_effects(&win);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -214,9 +281,15 @@ pub fn run() {
                                 let _ = window.set_focus();
                                 let _ = window.emit("quick-capture", ());
                             } else if shortcut_str.contains("M") {
-                                if window.is_visible().unwrap_or(false)
-                                    && window.is_focused().unwrap_or(false)
-                                {
+                                let main_visible = window.is_visible().unwrap_or(false);
+                                let main_focused = window.is_focused().unwrap_or(false);
+                                let sticky_focused = app.webview_windows().iter().any(|(label, w)| {
+                                    label.starts_with("sticky-")
+                                        && w.is_focused().unwrap_or(false)
+                                });
+                                let app_in_foreground = main_focused || sticky_focused;
+
+                                if main_visible && app_in_foreground {
                                     let _ = window.hide();
                                 } else {
                                     let _ = window.show();
@@ -246,43 +319,7 @@ pub fn run() {
 
             // Get the main window
             let win = app.get_webview_window("main").unwrap();
-
-            #[cfg(target_os = "macos")]
-            {
-                // 1. Use a dark vibrancy material
-                window_vibrancy::apply_vibrancy(
-                    &win,
-                    window_vibrancy::NSVisualEffectMaterial::HudWindow,
-                    Some(window_vibrancy::NSVisualEffectState::Active),
-                    Some(12.0),
-                )
-                .expect("Failed to apply macOS vibrancy");
-
-                // 2. Restore native corner masking (needed when decorations: false)
-                use objc::{msg_send, sel, sel_impl};
-                use raw_window_handle::HasWindowHandle;
-
-                if let Ok(handle) = win.window_handle() {
-                    match handle.as_raw() {
-                        raw_window_handle::RawWindowHandle::AppKit(appkit) => unsafe {
-                            let ns_view = appkit.ns_view.as_ptr() as *mut objc::runtime::Object;
-                            let ns_window: *mut objc::runtime::Object = msg_send![ns_view, window];
-                            let content_view: *mut objc::runtime::Object =
-                                msg_send![ns_window, contentView];
-                            let () = msg_send![content_view, setWantsLayer: true];
-                            let layer: *mut objc::runtime::Object =
-                                msg_send![content_view, layer];
-                            let () = msg_send![layer, setCornerRadius: 12.0_f64];
-                            let () = msg_send![layer, setMasksToBounds: true];
-                        },
-                        _ => {}
-                    }
-                }
-            }
-
-            #[cfg(target_os = "windows")]
-            window_vibrancy::apply_blur(&win, Some((18, 18, 24, 125)))
-                .expect("Failed to apply Windows blur");
+            apply_glass_effects(&win);
 
             // Setup system tray
             let _tray = TrayIconBuilder::new()
@@ -318,6 +355,7 @@ pub fn run() {
             read_asset,
             copy_to_assets,
             reveal_asset,
+            create_sticky_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LeviNote");

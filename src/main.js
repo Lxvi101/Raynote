@@ -9,6 +9,41 @@ import katex from "katex";
 import "katex/dist/katex.min.css";
 import "./style.css";
 
+const urlParams = new URLSearchParams(window.location.search);
+const isSticky = urlParams.get("sticky") === "1";
+const stickyNoteId = urlParams.get("id");
+if (isSticky) {
+  document.documentElement.classList.add("sticky-mode");
+}
+
+/** Main window hides; sticky windows are destroyed so they do not respawn on global shortcuts. */
+function closeCurrentWindow() {
+  if (isSticky) {
+    getCurrentWindow().close();
+  } else {
+    getCurrentWindow().hide();
+  }
+}
+
+/** Subtle dark glass tints (gradient stops on #app); kept low-chroma for readability. */
+const STICKY_TINT_PRESETS = [
+  { id: "mist", label: "Mist", c1: "rgba(20, 22, 28, 0.92)", c2: "rgba(15, 17, 22, 0.90)" },
+  { id: "lavender", label: "Lavender", c1: "rgba(24, 21, 30, 0.92)", c2: "rgba(17, 16, 24, 0.90)" },
+  { id: "rose", label: "Rose", c1: "rgba(28, 20, 23, 0.92)", c2: "rgba(21, 17, 19, 0.90)" },
+  { id: "clay", label: "Clay", c1: "rgba(28, 22, 19, 0.92)", c2: "rgba(22, 18, 16, 0.90)" },
+  { id: "mint", label: "Mint", c1: "rgba(18, 24, 22, 0.92)", c2: "rgba(15, 20, 19, 0.90)" },
+  { id: "olive", label: "Olive", c1: "rgba(24, 25, 19, 0.92)", c2: "rgba(19, 20, 16, 0.90)" },
+  { id: "sky", label: "Sky", c1: "rgba(18, 22, 30, 0.92)", c2: "rgba(15, 18, 24, 0.90)" },
+];
+
+const STICKY_TINT_LEGACY = { peach: "clay", butter: "olive" };
+
+function stickyTintIdFromStorage(raw) {
+  if (!raw) return null;
+  const id = STICKY_TINT_LEGACY[raw] || raw;
+  return STICKY_TINT_PRESETS.some((p) => p.id === id) ? id : null;
+}
+
 // ─── Utilities (hoisted for use in extensions) ───
 function escapeHtml(str) {
   const div = document.createElement("div");
@@ -176,9 +211,10 @@ marked.setOptions({
 // ─── Shortcuts system ───
 const defaultShortcuts = {
   newNote:        { label: "New Note",             key: "n", meta: true },
+  newSticky:      { label: "Open Sticky (this note)", key: "n", meta: true, shift: true },
   deleteNote:     { label: "Delete Note",          key: "Backspace", meta: true, shift: true },
   toggleEdit:     { label: "Toggle Edit/Preview",  key: "e", meta: true },
-  toggleSidebar:  { label: "Toggle Sidebar",       key: "b", meta: true },
+  toggleSidebar:  { label: "Toggle Sidebar",       key: "s", meta: true, shift: true },
   save:           { label: "Save Note",            key: "s", meta: true },
   closeWindow:    { label: "Close Window",         key: "w", meta: true },
   openPalette:    { label: "Search Notes",         key: "k", meta: true },
@@ -350,6 +386,7 @@ function createSettingsPanel() {
 const settingsPanel = createSettingsPanel();
 
 function openSettings() {
+  if (isSticky) return;
   state.settingsOpen = true;
   state.recordingShortcut = null;
   settingsPanel.classList.remove("hidden");
@@ -439,14 +476,42 @@ function handleShortcutRecording(e) {
 
 // ─── Init ───
 async function init() {
-  // Restore dock visibility
-  if (localStorage.getItem("levinote-hide-dock") === "1") {
-    invoke("set_dock_visible", { visible: false });
+  if (!isSticky) {
+    if (localStorage.getItem("levinote-hide-dock") === "1") {
+      invoke("set_dock_visible", { visible: false });
+    }
+  }
+
+  if (isSticky && stickyNoteId) {
+    const raw = localStorage.getItem(`levinote-sticky-tint-${stickyNoteId}`);
+    applyStickyTintById(stickyTintIdFromStorage(raw) || "mist");
   }
 
   await loadNotes();
 
-  if (state.notes.length > 0) {
+  if (isSticky) {
+    state.sidebarOpen = false;
+    sidebar.classList.remove("open");
+    if (!stickyNoteId) {
+      showEmptyState();
+      setupEventListeners();
+      setupTauriListeners();
+      return;
+    }
+    const exists = state.notes.some((n) => n.id === stickyNoteId);
+    if (!exists) {
+      preview.innerHTML = '<div class="empty-state">This sticky could not be found.</div>';
+      preview.classList.add("visible");
+      editor.classList.remove("visible");
+      setupEventListeners();
+      setupTauriListeners();
+      return;
+    }
+    await selectNote(stickyNoteId);
+    setupStickyTintPicker();
+    setMode("edit");
+    editor.focus();
+  } else if (state.notes.length > 0) {
     await selectNote(state.notes[0].id);
   } else {
     showEmptyState();
@@ -493,6 +558,141 @@ async function createNote() {
   setMode("edit");
   editor.setSelectionRange(2, 10); // select "Untitled"
   editor.focus();
+}
+
+async function openNewSticky() {
+  if (!state.currentId) {
+    showCopyToast("Open a note first");
+    return;
+  }
+  try {
+    await invoke("create_sticky_window", { id: state.currentId });
+  } catch {
+    showCopyToast("Could not open sticky");
+  }
+}
+
+function applyStickyTintById(presetId) {
+  const preset = STICKY_TINT_PRESETS.find((p) => p.id === presetId) || STICKY_TINT_PRESETS[0];
+  const app = document.getElementById("app");
+  app.style.setProperty("--sticky-glass-1", preset.c1);
+  app.style.setProperty("--sticky-glass-2", preset.c2);
+}
+
+function setupStickyTintPicker() {
+  const el = document.getElementById("sticky-tint-picker");
+  if (!el || !stickyNoteId) return;
+  const raw = localStorage.getItem(`levinote-sticky-tint-${stickyNoteId}`);
+  const current = stickyTintIdFromStorage(raw) || "mist";
+  applyStickyTintById(current);
+
+  const currentPreset = STICKY_TINT_PRESETS.find((p) => p.id === current) || STICKY_TINT_PRESETS[0];
+  el.innerHTML = `
+    <div class="sticky-tint-dd">
+      <button type="button" class="sticky-tint-dd-trigger" aria-expanded="false" aria-haspopup="listbox" aria-label="Glass tint">
+        <span class="sticky-tint-dd-value">${escapeHtml(currentPreset.label)}</span>
+        <svg class="sticky-tint-dd-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+          <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <ul class="sticky-tint-dd-menu" role="listbox" hidden>
+        ${STICKY_TINT_PRESETS.map(
+          (p) => `
+          <li role="presentation">
+            <button type="button" role="option" class="sticky-tint-dd-option${p.id === current ? " is-selected" : ""}"
+              data-tint="${escapeHtml(p.id)}" aria-selected="${p.id === current}">
+              ${escapeHtml(p.label)}
+            </button>
+          </li>`
+        ).join("")}
+      </ul>
+    </div>
+  `;
+
+  const dd = el.querySelector(".sticky-tint-dd");
+  const trigger = el.querySelector(".sticky-tint-dd-trigger");
+  const menu = el.querySelector(".sticky-tint-dd-menu");
+  const valueEl = el.querySelector(".sticky-tint-dd-value");
+  let docMousedown;
+  let docKeydown;
+  let onResize;
+
+  function positionMenu() {
+    const rect = trigger.getBoundingClientRect();
+    const w = Math.max(rect.width, 148);
+    menu.style.position = "fixed";
+    menu.style.top = `${Math.round(rect.bottom + 4)}px`;
+    menu.style.left = `${Math.round(rect.left)}px`;
+    menu.style.width = `${Math.round(w)}px`;
+    menu.style.zIndex = "6000";
+  }
+
+  function closeMenu() {
+    dd.classList.remove("is-open");
+    menu.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    if (docMousedown) {
+      document.removeEventListener("mousedown", docMousedown);
+      docMousedown = null;
+    }
+    if (docKeydown) {
+      document.removeEventListener("keydown", docKeydown);
+      docKeydown = null;
+    }
+    if (onResize) {
+      window.removeEventListener("resize", onResize);
+      onResize = null;
+    }
+  }
+
+  function openMenu() {
+    dd.classList.add("is-open");
+    menu.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    positionMenu();
+    onResize = () => positionMenu();
+    window.addEventListener("resize", onResize);
+    docMousedown = (e) => {
+      if (!dd.contains(e.target)) closeMenu();
+    };
+    docKeydown = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeMenu();
+        trigger.focus();
+      }
+    };
+    setTimeout(() => {
+      document.addEventListener("mousedown", docMousedown);
+      document.addEventListener("keydown", docKeydown);
+    }, 0);
+  }
+
+  function selectTint(id) {
+    localStorage.setItem(`levinote-sticky-tint-${stickyNoteId}`, id);
+    applyStickyTintById(id);
+    const preset = STICKY_TINT_PRESETS.find((p) => p.id === id);
+    if (preset) valueEl.textContent = preset.label;
+    menu.querySelectorAll(".sticky-tint-dd-option").forEach((btn) => {
+      const on = btn.dataset.tint === id;
+      btn.classList.toggle("is-selected", on);
+      btn.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    closeMenu();
+  }
+
+  trigger.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (dd.classList.contains("is-open")) closeMenu();
+    else openMenu();
+  });
+
+  menu.querySelectorAll(".sticky-tint-dd-option").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      selectTint(btn.dataset.tint);
+    });
+  });
 }
 
 const deletedNotesStack = [];
@@ -895,8 +1095,45 @@ function setMode(mode) {
 
 // ─── Command Palette ───
 function getCommands() {
+  if (isSticky) {
+    return [
+      {
+        label: "Open Sticky (this note)",
+        hint: formatShortcut(state.shortcuts.newSticky),
+        action: openNewSticky,
+      },
+      { label: "Delete Note", hint: formatShortcut(state.shortcuts.deleteNote), action: deleteCurrentNote },
+      { label: "Undo Delete Note", hint: formatShortcut(state.shortcuts.undoDelete), action: undoDeleteNote },
+      {
+        label: "Toggle Edit/Preview",
+        hint: formatShortcut(state.shortcuts.toggleEdit),
+        action: () => setMode(state.mode === "edit" ? "preview" : "edit"),
+      },
+      {
+        label: "Pin Window on Top",
+        hint: formatShortcut(state.shortcuts.pinWindow),
+        action: () => togglePin(),
+      },
+      {
+        label: "Copy Note as Markdown",
+        hint: formatShortcut(state.shortcuts.copyNote),
+        action: copyNoteMarkdown,
+      },
+      {
+        label: "Close Window",
+        hint: formatShortcut(state.shortcuts.closeWindow),
+        action: () => closeCurrentWindow(),
+      },
+    ];
+  }
+
   return [
     { label: "New Note", hint: formatShortcut(state.shortcuts.newNote), action: createNote },
+    {
+      label: "Open Sticky (this note)",
+      hint: formatShortcut(state.shortcuts.newSticky),
+      action: openNewSticky,
+    },
     { label: "Delete Note", hint: formatShortcut(state.shortcuts.deleteNote), action: deleteCurrentNote },
     { label: "Undo Delete Note", hint: formatShortcut(state.shortcuts.undoDelete), action: undoDeleteNote },
     {
@@ -927,7 +1164,7 @@ function getCommands() {
     {
       label: "Close Window",
       hint: formatShortcut(state.shortcuts.closeWindow),
-      action: () => getCurrentWindow().hide(),
+      action: () => closeCurrentWindow(),
     },
   ];
 }
@@ -1013,6 +1250,7 @@ function executePaletteItem(index) {
 
 // ─── Sidebar ───
 function toggleSidebar() {
+  if (isSticky) return;
   state.sidebarOpen = !state.sidebarOpen;
   sidebar.classList.toggle("open", state.sidebarOpen);
 }
@@ -1075,17 +1313,29 @@ function setupEventListeners() {
   document.getElementById("btn-settings").addEventListener("click", openSettings);
   document.getElementById("btn-pin").addEventListener("click", togglePin);
   document.getElementById("btn-new").addEventListener("click", createNote);
-  document.getElementById("btn-close").addEventListener("click", () => getCurrentWindow().hide());
+  document.getElementById("btn-close").addEventListener("click", () => closeCurrentWindow());
   document.getElementById("btn-minimize").addEventListener("click", () => getCurrentWindow().minimize());
 
+  // Sticky: CSS -webkit-app-region / data-tauri-drag-region fail to hit the gap between tint and
+  // window controls on transparent WKWebView; use the window API instead.
+  if (isSticky) {
+    const tb = document.getElementById("titlebar");
+    tb.removeAttribute("data-tauri-drag-region");
+    document.querySelector(".titlebar-drag-spacer")?.removeAttribute("data-tauri-drag-region");
+    tb.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      if (e.target.closest(".titlebar-btn") || e.target.closest(".sticky-tint-dd")) return;
+      void getCurrentWindow().startDragging();
+    });
+  }
 
   // Drag & drop
   setupDropHandler();
 
   // ─── Block web-app behaviors to feel native ───
-  // Prevent right-click context menu (except in text inputs)
+  // Prevent right-click context menu (except in text inputs and preview)
   document.addEventListener("contextmenu", (e) => {
-    if (!e.target.closest("textarea, input")) e.preventDefault();
+    if (!e.target.closest("textarea, input, #preview")) e.preventDefault();
   });
 
   // Block refresh, devtools, and other browser-revealing shortcuts
@@ -1139,13 +1389,25 @@ function setupEventListeners() {
 
     if (matchesShortcut(e, sc.settings)) {
       e.preventDefault();
-      state.settingsOpen ? closeSettings() : openSettings();
+      if (!isSticky) {
+        state.settingsOpen ? closeSettings() : openSettings();
+      }
+      return;
+    }
+
+    if (matchesShortcut(e, sc.newSticky)) {
+      e.preventDefault();
+      openNewSticky();
       return;
     }
 
     if (matchesShortcut(e, sc.newNote)) {
       e.preventDefault();
-      createNote();
+      if (isSticky) {
+        openNewSticky();
+      } else {
+        createNote();
+      }
       return;
     }
 
@@ -1164,7 +1426,7 @@ function setupEventListeners() {
 
     if (matchesShortcut(e, sc.toggleSidebar)) {
       e.preventDefault();
-      toggleSidebar();
+      if (!isSticky) toggleSidebar();
       return;
     }
 
@@ -1200,7 +1462,7 @@ function setupEventListeners() {
 
     if (matchesShortcut(e, sc.closeWindow)) {
       e.preventDefault();
-      getCurrentWindow().hide();
+      closeCurrentWindow();
       return;
     }
 
@@ -1266,7 +1528,13 @@ function setupEventListeners() {
     }
 
     // Focus search
-    if (e.key === "/" && state.mode === "preview" && !state.paletteMode && !state.settingsOpen) {
+    if (
+      e.key === "/" &&
+      state.mode === "preview" &&
+      !state.paletteMode &&
+      !state.settingsOpen &&
+      !isSticky
+    ) {
       e.preventDefault();
       if (!state.sidebarOpen) toggleSidebar();
       search.focus();
@@ -1327,6 +1595,7 @@ function navigateNotes(direction) {
 // ─── Tauri event listeners ───
 function setupTauriListeners() {
   listen("quick-capture", () => {
+    if (isSticky) return;
     createNote();
   });
 }

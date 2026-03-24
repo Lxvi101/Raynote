@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default capabilities for LeviNote",
-  "windows": ["main"],
+  "windows": ["main", "sticky-*"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

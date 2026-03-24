@@ -92,6 +92,10 @@ html, body {
   transition: all var(--transition);
 }
 
+.sticky-mode #titlebar .titlebar-btn {
+  cursor: pointer;
+}
+
 .titlebar-btn:hover {
   background: var(--surface-hover);
   color: var(--text);
@@ -291,6 +295,7 @@ html, body {
   pointer-events: none;
   transition: opacity 200ms ease;
   scrollbar-width: none;
+  user-select: text;
 }
 
 #preview::-webkit-scrollbar {
@@ -1344,4 +1349,190 @@ button:focus-visible {
 
 .asset-link svg {
   flex-shrink: 0;
+}
+
+/* ─── Sticky note windows ─── */
+/* Programmatic drag via startDragging() — disable CSS regions so the whole bar can initiate drag */
+.sticky-mode #titlebar {
+  -webkit-app-region: no-drag;
+  cursor: grab;
+}
+
+.sticky-mode .titlebar-title {
+  display: none !important;
+}
+
+.sticky-mode #btn-sidebar,
+.sticky-mode #btn-settings,
+.sticky-mode #btn-minimize {
+  display: none !important;
+}
+
+.sticky-mode #sidebar {
+  display: none !important;
+}
+
+.sticky-mode .titlebar-left {
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+}
+
+/* Flex filler between tint control and window buttons (mousedown handled in JS for dragging). */
+.titlebar-drag-spacer {
+  display: none;
+  flex: 1 1 auto;
+  min-width: 12px;
+  align-self: stretch;
+  margin: 0 2px;
+  min-height: 42px;
+}
+
+.sticky-mode .titlebar-drag-spacer {
+  display: block;
+}
+
+.sticky-tint-picker {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  margin-left: 0;
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.sticky-mode .sticky-tint-picker {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  -webkit-app-region: no-drag;
+}
+
+/* Custom tint dropdown (avoids native select styling) */
+.sticky-tint-dd {
+  position: relative;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+
+.sticky-tint-dd-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 118px;
+  max-width: 168px;
+  height: 28px;
+  padding: 0 10px;
+  font-family: var(--font);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), color var(--transition),
+    box-shadow var(--transition);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  -webkit-app-region: no-drag;
+}
+
+.sticky-tint-dd-trigger:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: var(--text);
+}
+
+.sticky-tint-dd-trigger:focus-visible {
+  outline: none;
+  border-color: rgba(124, 111, 247, 0.55);
+  box-shadow: 0 0 0 3px rgba(124, 111, 247, 0.18);
+}
+
+.sticky-tint-dd-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.sticky-tint-dd-chevron {
+  flex-shrink: 0;
+  opacity: 0.65;
+  transition: transform 160ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.sticky-tint-dd.is-open .sticky-tint-dd-chevron {
+  transform: rotate(180deg);
+}
+
+.sticky-tint-dd-menu {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  background: var(--bg-solid);
+  border: 1px solid var(--border-focus);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.05);
+  animation: sticky-dd-in 140ms cubic-bezier(0.2, 0, 0, 1);
+  -webkit-app-region: no-drag;
+}
+
+@keyframes sticky-dd-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+
+.sticky-tint-dd-menu li {
+  margin: 0;
+  padding: 0;
+}
+
+.sticky-tint-dd-option {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+  -webkit-app-region: no-drag;
+}
+
+.sticky-tint-dd-option:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.sticky-tint-dd-option.is-selected {
+  background: rgba(124, 111, 247, 0.12);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.sticky-tint-dd-option:focus-visible {
+  outline: none;
+  background: var(--surface-active);
+}
+
+.sticky-mode #app {
+  background: linear-gradient(
+    165deg,
+    var(--sticky-glass-1, rgba(20, 22, 28, 0.92)),
+    var(--sticky-glass-2, rgba(15, 17, 22, 0.90))
+  );
 }
