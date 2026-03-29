@@ -263,9 +263,16 @@ function matchesShortcut(e, sc) {
   return e.key.toLowerCase() === sc.key.toLowerCase() || e.key === sc.key;
 }
 
+// ─── Pagination constants ───
+const PAGE_SIZE = 50;
+
 // ─── State ───
 const state = {
   notes: [],
+  totalNotes: 0,
+  notesOffset: 0,
+  loadingMore: false,
+  searchQuery: "",
   currentId: null,
   mode: "preview", // 'preview' | 'edit'
   sidebarOpen: true,
@@ -498,8 +505,9 @@ async function init() {
       setupTauriListeners();
       return;
     }
-    const exists = state.notes.some((n) => n.id === stickyNoteId);
-    if (!exists) {
+    // Check if note exists by trying to read it (may not be in paginated list)
+    const stickyContent = await invoke("read_note", { id: stickyNoteId });
+    if (!stickyContent) {
       preview.innerHTML = '<div class="empty-state">This sticky could not be found.</div>';
       preview.classList.add("visible");
       editor.classList.remove("visible");
@@ -523,8 +531,32 @@ async function init() {
 
 // ─── Notes CRUD ───
 async function loadNotes() {
-  state.notes = await invoke("list_notes");
+  state.searchQuery = "";
+  search.value = "";
+  const result = await invoke("list_notes_paginated", { offset: 0, limit: PAGE_SIZE });
+  state.notes = result.notes;
+  state.totalNotes = result.total;
+  state.notesOffset = result.notes.length;
   renderNoteList();
+}
+
+async function loadMoreNotes() {
+  if (state.loadingMore || state.searchQuery || state.notesOffset >= state.totalNotes) return;
+  state.loadingMore = true;
+  try {
+    const result = await invoke("list_notes_paginated", {
+      offset: state.notesOffset,
+      limit: PAGE_SIZE,
+    });
+    if (result.notes.length > 0) {
+      state.notes = [...state.notes, ...result.notes];
+      state.totalNotes = result.total;
+      state.notesOffset += result.notes.length;
+      renderNoteList();
+    }
+  } finally {
+    state.loadingMore = false;
+  }
 }
 
 async function selectNote(id) {
@@ -537,7 +569,7 @@ async function selectNote(id) {
   editor.value = content;
   renderPreview(content);
   setMode("preview");
-  renderNoteList();
+  renderNoteList(state.searchQuery);
   updateTitle();
 }
 
@@ -545,7 +577,19 @@ async function saveCurrentNote() {
   if (!state.currentId) return;
   await invoke("save_note", { id: state.currentId, content: editor.value });
   state.dirty = false;
-  await loadNotes();
+  // Update the metadata for the current note in-place instead of reloading all
+  const content = editor.value;
+  const title = (content.split("\n")[0] || state.currentId).replace(/^#+\s*/, "").trim() || state.currentId;
+  const previewText = content.split("\n").slice(1, 3).join(" ").slice(0, 100);
+  const now = Math.floor(Date.now() / 1000);
+  const idx = state.notes.findIndex((n) => n.id === state.currentId);
+  const updatedMeta = { id: state.currentId, title, modified: now, preview: previewText };
+  if (idx >= 0) {
+    state.notes.splice(idx, 1);
+  }
+  // Insert at top (most recently modified)
+  state.notes.unshift(updatedMeta);
+  renderNoteList(state.searchQuery);
 }
 
 async function createNote() {
@@ -702,9 +746,12 @@ async function deleteCurrentNote() {
   const content = await invoke("read_note", { id: state.currentId });
   deletedNotesStack.push({ id: state.currentId, content });
   await invoke("delete_note", { id: state.currentId });
+  // Remove from local list
+  state.notes = state.notes.filter((n) => n.id !== state.currentId);
+  state.totalNotes = Math.max(0, state.totalNotes - 1);
   state.currentId = null;
   state.dirty = false;
-  await loadNotes();
+  renderNoteList(state.searchQuery);
 
   if (state.notes.length > 0) {
     await selectNote(state.notes[0].id);
@@ -1035,7 +1082,9 @@ function insertAtCursor(text) {
 }
 
 function renderNoteList(filter = "") {
-  const filtered = filter
+  // When searching, state.notes already contains search results from the backend.
+  // When not searching, state.notes contains the paginated list.
+  const displayNotes = filter
     ? state.notes.filter(
         (n) =>
           n.title.toLowerCase().includes(filter.toLowerCase()) ||
@@ -1043,21 +1092,74 @@ function renderNoteList(filter = "") {
       )
     : state.notes;
 
-  noteList.innerHTML = filtered
-    .map(
-      (n) => `
+  const hasMore = !state.searchQuery && state.notesOffset < state.totalNotes;
+
+  noteList.innerHTML =
+    displayNotes
+      .map(
+        (n) => `
     <li class="note-item ${n.id === state.currentId ? "active" : ""}" data-id="${n.id}">
       <div class="note-item-title">${escapeHtml(n.title)}</div>
       <div class="note-item-preview">${escapeHtml(n.preview)}</div>
       <div class="note-item-date">${formatDate(n.modified)}</div>
     </li>
   `
-    )
-    .join("");
+      )
+      .join("") +
+    (hasMore
+      ? `<li class="note-list-sentinel" aria-hidden="true" style="height:1px;"></li>`
+      : "");
 
   noteList.querySelectorAll(".note-item").forEach((el) => {
     el.addEventListener("click", () => selectNote(el.dataset.id));
   });
+
+  // Observe sentinel for infinite scroll
+  setupScrollObserver();
+}
+
+// ─── Infinite scroll observer ───
+let scrollObserver = null;
+
+function setupScrollObserver() {
+  if (scrollObserver) {
+    scrollObserver.disconnect();
+    scrollObserver = null;
+  }
+  const sentinel = noteList.querySelector(".note-list-sentinel");
+  if (!sentinel) return;
+
+  scrollObserver = new IntersectionObserver(
+    (entries) => {
+      if (entries[0].isIntersecting) {
+        loadMoreNotes();
+      }
+    },
+    { root: noteList, rootMargin: "200px" }
+  );
+  scrollObserver.observe(sentinel);
+}
+
+// ─── Debounced backend search ───
+let searchTimeout = null;
+
+async function handleSearch(query) {
+  state.searchQuery = query;
+  if (!query) {
+    // Restore paginated list
+    const result = await invoke("list_notes_paginated", { offset: 0, limit: PAGE_SIZE });
+    state.notes = result.notes;
+    state.totalNotes = result.total;
+    state.notesOffset = result.notes.length;
+    renderNoteList();
+    return;
+  }
+  // Search on backend — returns up to 100 results
+  const results = await invoke("search_notes", { query, limit: 100 });
+  state.notes = results;
+  state.totalNotes = results.length;
+  state.notesOffset = results.length;
+  renderNoteList();
 }
 
 function showEmptyState() {
@@ -1184,36 +1286,47 @@ function closePalette() {
   paletteInput.value = "";
 }
 
+let paletteSearchTimeout = null;
+
 function renderPalette() {
   const query = paletteInput.value.toLowerCase();
-  let items = [];
 
   if (state.paletteMode === "commands" || query.startsWith(">")) {
     const q = query.replace(/^>\s*/, "");
-    items = getCommands()
+    const items = getCommands()
       .filter((c) => c.label.toLowerCase().includes(q))
       .map((c) => ({
         label: c.label,
         hint: c.hint,
         action: c.action,
       }));
+    renderPaletteItems(items);
   } else {
-    // Notes search
-    const filtered = query
-      ? state.notes.filter(
-          (n) =>
-            n.title.toLowerCase().includes(query) ||
-            n.preview.toLowerCase().includes(query)
-        )
-      : state.notes;
-
-    items = filtered.map((n) => ({
-      label: n.title,
-      hint: formatDate(n.modified),
-      action: () => selectNote(n.id),
-    }));
+    // Notes search — debounce backend call
+    clearTimeout(paletteSearchTimeout);
+    if (!query) {
+      // Show current loaded notes immediately
+      const items = state.notes.slice(0, 50).map((n) => ({
+        label: n.title,
+        hint: formatDate(n.modified),
+        action: () => selectNote(n.id),
+      }));
+      renderPaletteItems(items);
+    } else {
+      paletteSearchTimeout = setTimeout(async () => {
+        const results = await invoke("search_notes", { query, limit: 50 });
+        const items = results.map((n) => ({
+          label: n.title,
+          hint: formatDate(n.modified),
+          action: () => selectNote(n.id),
+        }));
+        renderPaletteItems(items);
+      }, 150);
+    }
   }
+}
 
+function renderPaletteItems(items) {
   if (state.selectedPaletteIndex >= items.length) {
     state.selectedPaletteIndex = Math.max(0, items.length - 1);
   }
@@ -1274,9 +1387,11 @@ function setupEventListeners() {
     saveTimeout = setTimeout(() => saveCurrentNote(), 800);
   });
 
-  // Search
+  // Search (debounced, backend-powered)
   search.addEventListener("input", () => {
-    renderNoteList(search.value);
+    clearTimeout(searchTimeout);
+    const query = search.value.trim();
+    searchTimeout = setTimeout(() => handleSearch(query), 200);
   });
 
   // Palette input

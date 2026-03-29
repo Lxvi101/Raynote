@@ -29,8 +29,14 @@ struct NoteMeta {
     preview: String,
 }
 
-#[tauri::command]
-fn list_notes() -> Vec<NoteMeta> {
+#[derive(Serialize, Deserialize)]
+struct PaginatedNotes {
+    notes: Vec<NoteMeta>,
+    total: usize,
+}
+
+/// Read all note metadata from disk, sorted by modified desc.
+fn read_all_notes() -> Vec<NoteMeta> {
     let dir = notes_dir();
     let mut notes: Vec<NoteMeta> = Vec::new();
 
@@ -85,6 +91,32 @@ fn list_notes() -> Vec<NoteMeta> {
 
     notes.sort_by(|a, b| b.modified.cmp(&a.modified));
     notes
+}
+
+#[tauri::command]
+fn list_notes() -> Vec<NoteMeta> {
+    read_all_notes()
+}
+
+#[tauri::command]
+fn list_notes_paginated(offset: usize, limit: usize) -> PaginatedNotes {
+    let all = read_all_notes();
+    let total = all.len();
+    let notes = all.into_iter().skip(offset).take(limit).collect();
+    PaginatedNotes { notes, total }
+}
+
+#[tauri::command]
+fn search_notes(query: String, limit: usize) -> Vec<NoteMeta> {
+    let q = query.to_lowercase();
+    let all = read_all_notes();
+    all.into_iter()
+        .filter(|n| {
+            n.title.to_lowercase().contains(&q)
+                || n.preview.to_lowercase().contains(&q)
+        })
+        .take(limit)
+        .collect()
 }
 
 #[tauri::command]
@@ -346,6 +378,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_notes,
+            list_notes_paginated,
+            search_notes,
             read_note,
             save_note,
             delete_note,
