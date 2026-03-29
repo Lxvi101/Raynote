@@ -222,6 +222,7 @@ const defaultShortcuts = {
   pinWindow:      { label: "Pin Window on Top",    key: "t", meta: true, shift: true },
   copyNote:       { label: "Copy Note as Markdown", key: "c", meta: true, shift: true },
   undoDelete:     { label: "Undo Delete Note",     key: "Tab", meta: true, shift: true },
+  pinNote:        { label: "Pin/Unpin Note",       key: "p", meta: true, alt: true },
   settings:       { label: "Settings",             key: ",", meta: true },
 };
 
@@ -266,6 +267,33 @@ function matchesShortcut(e, sc) {
 // ─── Pagination constants ───
 const PAGE_SIZE = 50;
 
+// ─── Pinned notes ───
+function loadPinnedNotes() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem("levinote-pinned-notes") || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function savePinnedNotes(pinnedSet) {
+  localStorage.setItem("levinote-pinned-notes", JSON.stringify([...pinnedSet]));
+}
+
+function toggleNotePin(id) {
+  if (state.pinnedNotes.has(id)) {
+    state.pinnedNotes.delete(id);
+  } else {
+    state.pinnedNotes.add(id);
+  }
+  savePinnedNotes(state.pinnedNotes);
+  renderNoteList(state.searchQuery);
+}
+
+function isNotePinned(id) {
+  return state.pinnedNotes.has(id);
+}
+
 // ─── State ───
 const state = {
   notes: [],
@@ -273,6 +301,7 @@ const state = {
   notesOffset: 0,
   loadingMore: false,
   searchQuery: "",
+  pinnedNotes: loadPinnedNotes(),
   currentId: null,
   mode: "preview", // 'preview' | 'edit'
   sidebarOpen: true,
@@ -534,7 +563,18 @@ async function loadNotes() {
   state.searchQuery = "";
   search.value = "";
   const result = await invoke("list_notes_paginated", { offset: 0, limit: PAGE_SIZE });
-  state.notes = result.notes;
+
+  // Ensure pinned notes are always loaded even if not in the first page
+  const loadedIds = new Set(result.notes.map((n) => n.id));
+  const missingPinned = [...state.pinnedNotes].filter((id) => !loadedIds.has(id));
+  let pinnedExtras = [];
+  if (missingPinned.length > 0) {
+    // Fetch all notes to find the missing pinned ones (they could be old)
+    const all = await invoke("list_notes");
+    pinnedExtras = all.filter((n) => missingPinned.includes(n.id));
+  }
+
+  state.notes = [...pinnedExtras, ...result.notes];
   state.totalNotes = result.total;
   state.notesOffset = result.notes.length;
   renderNoteList();
@@ -744,8 +784,14 @@ const deletedNotesStack = [];
 async function deleteCurrentNote() {
   if (!state.currentId) return;
   const content = await invoke("read_note", { id: state.currentId });
-  deletedNotesStack.push({ id: state.currentId, content });
+  const wasPinned = isNotePinned(state.currentId);
+  deletedNotesStack.push({ id: state.currentId, content, wasPinned });
   await invoke("delete_note", { id: state.currentId });
+  // Remove pin state
+  if (wasPinned) {
+    state.pinnedNotes.delete(state.currentId);
+    savePinnedNotes(state.pinnedNotes);
+  }
   // Remove from local list
   state.notes = state.notes.filter((n) => n.id !== state.currentId);
   state.totalNotes = Math.max(0, state.totalNotes - 1);
@@ -764,8 +810,13 @@ async function deleteCurrentNote() {
 
 async function undoDeleteNote() {
   if (deletedNotesStack.length === 0) return;
-  const { id, content } = deletedNotesStack.pop();
+  const { id, content, wasPinned } = deletedNotesStack.pop();
   await invoke("save_note", { id, content });
+  // Restore pin state if it was pinned before deletion
+  if (wasPinned) {
+    state.pinnedNotes.add(id);
+    savePinnedNotes(state.pinnedNotes);
+  }
   await loadNotes();
   await selectNote(id);
 }
@@ -1081,6 +1132,23 @@ function insertAtCursor(text) {
   saveCurrentNote();
 }
 
+const PIN_ICON_SVG = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M9.5 2L14 6.5L10.5 10L11.5 14.5L8 11L4.5 14.5L5.5 10L2 6.5L6.5 2L8 4.5L9.5 2Z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+function renderNoteItem(n) {
+  const isPinned = isNotePinned(n.id);
+  return `
+    <li class="note-item ${n.id === state.currentId ? "active" : ""}${isPinned ? " pinned" : ""}" data-id="${n.id}">
+      <div class="note-item-header">
+        <div class="note-item-title">${escapeHtml(n.title)}</div>
+        <button class="note-pin-btn${isPinned ? " is-pinned" : ""}" data-pin-id="${n.id}" title="${isPinned ? "Unpin" : "Pin"} note" aria-label="${isPinned ? "Unpin" : "Pin"} note">
+          ${PIN_ICON_SVG}
+        </button>
+      </div>
+      <div class="note-item-preview">${escapeHtml(n.preview)}</div>
+      <div class="note-item-date">${formatDate(n.modified)}</div>
+    </li>`;
+}
+
 function renderNoteList(filter = "") {
   // When searching, state.notes already contains search results from the backend.
   // When not searching, state.notes contains the paginated list.
@@ -1092,26 +1160,40 @@ function renderNoteList(filter = "") {
       )
     : state.notes;
 
+  // Split into pinned and unpinned
+  const pinned = displayNotes.filter((n) => isNotePinned(n.id));
+  const unpinned = displayNotes.filter((n) => !isNotePinned(n.id));
+
   const hasMore = !state.searchQuery && state.notesOffset < state.totalNotes;
 
-  noteList.innerHTML =
-    displayNotes
-      .map(
-        (n) => `
-    <li class="note-item ${n.id === state.currentId ? "active" : ""}" data-id="${n.id}">
-      <div class="note-item-title">${escapeHtml(n.title)}</div>
-      <div class="note-item-preview">${escapeHtml(n.preview)}</div>
-      <div class="note-item-date">${formatDate(n.modified)}</div>
-    </li>
-  `
-      )
-      .join("") +
-    (hasMore
-      ? `<li class="note-list-sentinel" aria-hidden="true" style="height:1px;"></li>`
-      : "");
+  let html = "";
+  if (pinned.length > 0) {
+    html += `<li class="note-section-label" aria-hidden="true">Pinned</li>`;
+    html += pinned.map(renderNoteItem).join("");
+    if (unpinned.length > 0) {
+      html += `<li class="note-section-divider" aria-hidden="true"></li>`;
+    }
+  }
+  html += unpinned.map(renderNoteItem).join("");
+  if (hasMore) {
+    html += `<li class="note-list-sentinel" aria-hidden="true" style="height:1px;"></li>`;
+  }
+
+  noteList.innerHTML = html;
 
   noteList.querySelectorAll(".note-item").forEach((el) => {
-    el.addEventListener("click", () => selectNote(el.dataset.id));
+    el.addEventListener("click", (e) => {
+      // Don't navigate if clicking the pin button
+      if (e.target.closest(".note-pin-btn")) return;
+      selectNote(el.dataset.id);
+    });
+  });
+
+  noteList.querySelectorAll(".note-pin-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleNotePin(btn.dataset.pinId);
+    });
   });
 
   // Observe sentinel for infinite scroll
@@ -1197,12 +1279,19 @@ function setMode(mode) {
 
 // ─── Command Palette ───
 function getCommands() {
+  const pinLabelSticky = state.currentId && isNotePinned(state.currentId) ? "Unpin Note" : "Pin Note";
+
   if (isSticky) {
     return [
       {
         label: "Open Sticky (this note)",
         hint: formatShortcut(state.shortcuts.newSticky),
         action: openNewSticky,
+      },
+      {
+        label: pinLabelSticky,
+        hint: formatShortcut(state.shortcuts.pinNote),
+        action: () => { if (state.currentId) toggleNotePin(state.currentId); },
       },
       { label: "Delete Note", hint: formatShortcut(state.shortcuts.deleteNote), action: deleteCurrentNote },
       { label: "Undo Delete Note", hint: formatShortcut(state.shortcuts.undoDelete), action: undoDeleteNote },
@@ -1229,12 +1318,19 @@ function getCommands() {
     ];
   }
 
+  const pinLabel = state.currentId && isNotePinned(state.currentId) ? "Unpin Note" : "Pin Note";
+
   return [
     { label: "New Note", hint: formatShortcut(state.shortcuts.newNote), action: createNote },
     {
       label: "Open Sticky (this note)",
       hint: formatShortcut(state.shortcuts.newSticky),
       action: openNewSticky,
+    },
+    {
+      label: pinLabel,
+      hint: formatShortcut(state.shortcuts.pinNote),
+      action: () => { if (state.currentId) toggleNotePin(state.currentId); },
     },
     { label: "Delete Note", hint: formatShortcut(state.shortcuts.deleteNote), action: deleteCurrentNote },
     { label: "Undo Delete Note", hint: formatShortcut(state.shortcuts.undoDelete), action: undoDeleteNote },
@@ -1302,23 +1398,30 @@ function renderPalette() {
       }));
     renderPaletteItems(items);
   } else {
-    // Notes search — debounce backend call
+    // Notes search — debounce backend call, pinned first
     clearTimeout(paletteSearchTimeout);
     if (!query) {
-      // Show current loaded notes immediately
-      const items = state.notes.slice(0, 50).map((n) => ({
-        label: n.title,
-        hint: formatDate(n.modified),
-        action: () => selectNote(n.id),
-      }));
-      renderPaletteItems(items);
+      // Show pinned first, then recent notes
+      const pinnedItems = state.notes
+        .filter((n) => isNotePinned(n.id))
+        .map((n) => ({ label: n.title, hint: "pinned", action: () => selectNote(n.id), pinned: true }));
+      const unpinnedItems = state.notes
+        .filter((n) => !isNotePinned(n.id))
+        .slice(0, 50 - pinnedItems.length)
+        .map((n) => ({ label: n.title, hint: formatDate(n.modified), action: () => selectNote(n.id) }));
+      renderPaletteItems([...pinnedItems, ...unpinnedItems]);
     } else {
       paletteSearchTimeout = setTimeout(async () => {
         const results = await invoke("search_notes", { query, limit: 50 });
-        const items = results.map((n) => ({
+        // Sort pinned to top of search results
+        const pinnedResults = results.filter((n) => isNotePinned(n.id));
+        const unpinnedResults = results.filter((n) => !isNotePinned(n.id));
+        const sorted = [...pinnedResults, ...unpinnedResults];
+        const items = sorted.map((n) => ({
           label: n.title,
-          hint: formatDate(n.modified),
+          hint: isNotePinned(n.id) ? "pinned" : formatDate(n.modified),
           action: () => selectNote(n.id),
+          pinned: isNotePinned(n.id),
         }));
         renderPaletteItems(items);
       }, 150);
@@ -1334,8 +1437,8 @@ function renderPaletteItems(items) {
   paletteResults.innerHTML = items
     .map(
       (item, i) => `
-    <li class="palette-item ${i === state.selectedPaletteIndex ? "selected" : ""}" data-index="${i}">
-      <span class="palette-item-label">${escapeHtml(item.label)}</span>
+    <li class="palette-item ${i === state.selectedPaletteIndex ? "selected" : ""}${item.pinned ? " palette-item-pinned" : ""}" data-index="${i}">
+      <span class="palette-item-label">${item.pinned ? `<span class="palette-pin-icon">${PIN_ICON_SVG}</span>` : ""}${escapeHtml(item.label)}</span>
       <span class="palette-item-hint">${escapeHtml(item.hint)}</span>
     </li>
   `
@@ -1566,6 +1669,15 @@ function setupEventListeners() {
     if (matchesShortcut(e, sc.copyNote)) {
       e.preventDefault();
       copyNoteMarkdown();
+      return;
+    }
+
+    if (matchesShortcut(e, sc.pinNote)) {
+      e.preventDefault();
+      if (state.currentId) {
+        toggleNotePin(state.currentId);
+        showCopyToast(isNotePinned(state.currentId) ? "Note pinned" : "Note unpinned");
+      }
       return;
     }
 

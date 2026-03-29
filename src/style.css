@@ -202,12 +202,32 @@ html, body {
   display: none;
 }
 
+/* ─── Pinned section ─── */
+.note-section-label {
+  list-style: none;
+  padding: 6px 12px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.note-section-divider {
+  list-style: none;
+  height: 1px;
+  margin: 4px 12px;
+  background: var(--border);
+}
+
 .note-item {
   padding: 10px 12px;
   border-radius: 8px;
   cursor: pointer;
   transition: all var(--transition);
   margin-bottom: 2px;
+  position: relative;
 }
 
 .note-item:hover {
@@ -218,6 +238,12 @@ html, body {
   background: var(--surface-active);
 }
 
+.note-item-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .note-item-title {
   font-size: 13px;
   font-weight: 500;
@@ -226,6 +252,48 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   margin-bottom: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.note-pin-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition), color var(--transition), background var(--transition);
+  padding: 0;
+  margin-top: -2px;
+}
+
+.note-item:hover .note-pin-btn,
+.note-item.active .note-pin-btn {
+  opacity: 0.5;
+}
+
+.note-item:hover .note-pin-btn:hover,
+.note-item.active .note-pin-btn:hover {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--surface);
+}
+
+.note-pin-btn.is-pinned {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.note-pin-btn.is-pinned:hover {
+  opacity: 1;
+  color: var(--text-secondary);
 }
 
 .note-item-preview {
@@ -754,6 +822,22 @@ html, body {
   font-size: 11px;
   color: var(--text-dim);
   font-family: var(--font-mono);
+}
+
+.palette-item-pinned .palette-item-hint {
+  color: var(--accent);
+  font-family: var(--font);
+  font-weight: 500;
+}
+
+.palette-pin-icon {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 6px;
+  color: var(--accent);
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
 }
 
 /* ─── Code Copy Button ─── */
