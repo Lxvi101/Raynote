@@ -1,0 +1,10 @@
+Raynote — macOS DMG downloads
+----------------------------
+
+Installable DMGs are attached to each GitHub release:
+https://github.com/Lxvi101/LeviNote/releases
+
+After you run a local release build, you can copy the DMG into this folder with:
+  npm run copy:dmg
+
+CI builds (GitHub Actions on a version tag) produce an unsigned DMG. For a Developer ID–signed build, run `npm run tauri:build` on your Mac, then `npm run copy:dmg` and attach that file to the release if you prefer.

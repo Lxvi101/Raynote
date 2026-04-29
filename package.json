@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "copy:dmg": "node scripts/copy-release-dmg.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
