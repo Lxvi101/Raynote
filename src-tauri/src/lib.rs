@@ -2,12 +2,37 @@ use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::RwLock;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::{WebviewWindow, WebviewWindowBuilder},
-    Emitter, Manager, State, WebviewUrl,
+    AppHandle, Emitter, Manager, State, WebviewUrl,
 };
+use tauri_plugin_global_shortcut::{
+    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState as GsShortcutState,
+};
+
+// ─── Global shortcut roles ───
+// Two configurable global shortcuts. The Rust handler dispatches by comparing
+// the incoming Shortcut to the values stored in AppState (NOT by string match,
+// which would break the moment a user picked something other than N/M).
+const GS_ROLE_CAPTURE: &str = "capture";
+const GS_ROLE_TOGGLE: &str = "toggle";
+
+fn default_capture_shortcut() -> Shortcut {
+    Shortcut::new(
+        Some(Modifiers::CONTROL | Modifiers::META | Modifiers::ALT | Modifiers::SHIFT),
+        Code::KeyN,
+    )
+}
+
+fn default_toggle_shortcut() -> Shortcut {
+    Shortcut::new(
+        Some(Modifiers::CONTROL | Modifiers::META | Modifiers::ALT | Modifiers::SHIFT),
+        Code::KeyM,
+    )
+}
 
 fn notes_dir() -> PathBuf {
     let home = dirs_next::home_dir().expect("Could not find home directory");
@@ -46,6 +71,10 @@ struct PaginatedNotes {
 
 struct AppState {
     notes_cache: RwLock<Vec<NoteMeta>>,
+    /// Currently-registered "capture" (quick-capture / show window) global shortcut.
+    capture_shortcut: RwLock<Option<Shortcut>>,
+    /// Currently-registered "toggle" (show/hide window) global shortcut.
+    toggle_shortcut: RwLock<Option<Shortcut>>,
 }
 
 fn parse_note_meta(id: String, content: &str, modified: u64) -> NoteMeta {
@@ -462,6 +491,56 @@ fn create_sticky_window(app: tauri::AppHandle, id: String) -> Result<(), String>
     Ok(())
 }
 
+/// Replace the registered global shortcut for a given role.
+///
+/// `role` is `"capture"` or `"toggle"`. `accelerator` is in the format the
+/// global-shortcut plugin accepts (e.g. `"Ctrl+Cmd+Alt+Shift+KeyN"`).
+///
+/// On success the previous binding for that role is unregistered. On failure
+/// (parse error, OS-level conflict with another app, etc.) the previous
+/// binding is left in place and an error string is returned to the caller.
+#[tauri::command]
+fn set_global_shortcut(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    role: String,
+    accelerator: String,
+) -> Result<(), String> {
+    let new_shortcut = Shortcut::from_str(&accelerator)
+        .map_err(|e| format!("Could not parse shortcut '{}': {}", accelerator, e))?;
+
+    let slot = match role.as_str() {
+        GS_ROLE_CAPTURE => &state.capture_shortcut,
+        GS_ROLE_TOGGLE => &state.toggle_shortcut,
+        other => return Err(format!("Unknown shortcut role: {}", other)),
+    };
+
+    // No-op if the same accelerator is already registered for this role.
+    if let Some(current) = *slot.read().unwrap() {
+        if current == new_shortcut {
+            return Ok(());
+        }
+    }
+
+    // Try to register the new one first. If that fails (already taken,
+    // OS-reserved combo, etc.), bail without touching the existing binding.
+    app.global_shortcut()
+        .register(new_shortcut)
+        .map_err(|e| format!("Could not register '{}': {}", accelerator, e))?;
+
+    // Now unregister the old one (best-effort — if it errors we still keep
+    // the new one registered, since that's the user's intent).
+    let old = *slot.read().unwrap();
+    if let Some(old_shortcut) = old {
+        if old_shortcut != new_shortcut {
+            let _ = app.global_shortcut().unregister(old_shortcut);
+        }
+    }
+
+    *slot.write().unwrap() = Some(new_shortcut);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -469,29 +548,34 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                        let shortcut_str = shortcut.to_string();
-                        if let Some(window) = app.get_webview_window("main") {
-                            if shortcut_str.contains("N") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                                let _ = window.emit("quick-capture", ());
-                            } else if shortcut_str.contains("M") {
-                                let main_visible = window.is_visible().unwrap_or(false);
-                                let main_focused = window.is_focused().unwrap_or(false);
-                                let sticky_focused = app.webview_windows().iter().any(|(label, w)| {
-                                    label.starts_with("sticky-")
-                                        && w.is_focused().unwrap_or(false)
-                                });
-                                let app_in_foreground = main_focused || sticky_focused;
+                    if event.state != GsShortcutState::Pressed {
+                        return;
+                    }
+                    let state = app.state::<AppState>();
+                    let capture = *state.capture_shortcut.read().unwrap();
+                    let toggle = *state.toggle_shortcut.read().unwrap();
 
-                                if main_visible && app_in_foreground {
-                                    let _ = window.hide();
-                                } else {
-                                    let _ = window.show();
-                                    let _ = window.set_focus();
-                                }
-                            }
+                    let Some(window) = app.get_webview_window("main") else {
+                        return;
+                    };
+
+                    if Some(*shortcut) == capture {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                        let _ = window.emit("quick-capture", ());
+                    } else if Some(*shortcut) == toggle {
+                        let main_visible = window.is_visible().unwrap_or(false);
+                        let main_focused = window.is_focused().unwrap_or(false);
+                        let sticky_focused = app.webview_windows().iter().any(|(label, w)| {
+                            label.starts_with("sticky-") && w.is_focused().unwrap_or(false)
+                        });
+                        let app_in_foreground = main_focused || sticky_focused;
+
+                        if main_visible && app_in_foreground {
+                            let _ = window.hide();
+                        } else {
+                            let _ = window.show();
+                            let _ = window.set_focus();
                         }
                     }
                 })
@@ -499,24 +583,23 @@ pub fn run() {
         )
         .setup(|app| {
             let initial_notes = read_all_notes();
+            let capture = default_capture_shortcut();
+            let toggle = default_toggle_shortcut();
             app.manage(AppState {
                 notes_cache: RwLock::new(initial_notes),
+                capture_shortcut: RwLock::new(Some(capture)),
+                toggle_shortcut: RwLock::new(Some(toggle)),
             });
 
-            // Register global shortcut: Ctrl+Cmd+Option+Shift+N
-            use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
-            let shortcut = Shortcut::new(
-                Some(Modifiers::CONTROL | Modifiers::META | Modifiers::ALT | Modifiers::SHIFT),
-                Code::KeyN,
-            );
-            app.global_shortcut().register(shortcut)?;
-
-            // Register global shortcut: Ctrl+Cmd+Option+Shift+M (toggle window)
-            let toggle_shortcut = Shortcut::new(
-                Some(Modifiers::CONTROL | Modifiers::META | Modifiers::ALT | Modifiers::SHIFT),
-                Code::KeyM,
-            );
-            app.global_shortcut().register(toggle_shortcut)?;
+            // Register the defaults. If either fails (e.g. another running app
+            // already grabbed the combo), null out the role in state so the
+            // frontend's set_global_shortcut call can take over cleanly.
+            if app.global_shortcut().register(capture).is_err() {
+                *app.state::<AppState>().capture_shortcut.write().unwrap() = None;
+            }
+            if app.global_shortcut().register(toggle).is_err() {
+                *app.state::<AppState>().toggle_shortcut.write().unwrap() = None;
+            }
 
             // Get the main window
             let win = app.get_webview_window("main").unwrap();
@@ -563,6 +646,7 @@ pub fn run() {
             copy_to_assets,
             reveal_asset,
             create_sticky_window,
+            set_global_shortcut,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raynote");

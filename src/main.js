@@ -41,6 +41,148 @@ function getNewNoteTitleMode() {
   return DEFAULT_NEW_NOTE_TITLE_MODE;
 }
 
+// ─── Edge glow ───
+// The slow-sweeping red rim + inner glow on #app. CSS does the heavy
+// lifting; this just persists user preferences and pushes them into
+// CSS custom properties / root-level classes.
+const STORAGE_GLOW_ENABLED = "raynote-glow-enabled";
+const STORAGE_GLOW_STATIC = "raynote-glow-static";
+const STORAGE_GLOW_WIDTH = "raynote-glow-width";
+const STORAGE_GLOW_SIZE = "raynote-glow-size";
+const STORAGE_GLOW_INTENSITY = "raynote-glow-intensity";
+
+// Defaults are tuned for a calm, ambient look out of the box: a static
+// glow pinned at the top, with a thin rim and a small inner bleed.
+const DEFAULT_GLOW_STATIC = true;   // frozen at the top by default
+const DEFAULT_GLOW_WIDTH = 15;      // 0–100; 15 → ~0.9px rim (thin)
+const DEFAULT_GLOW_SIZE = 10;       // 0–100; 10 → tight edge-only inner glow
+const DEFAULT_GLOW_INTENSITY = 100; // 0–100; 100 = full alpha as authored in CSS
+
+function getGlowSettings() {
+  const enabledRaw = localStorage.getItem(STORAGE_GLOW_ENABLED);
+  const staticRaw = localStorage.getItem(STORAGE_GLOW_STATIC);
+  const widthRaw = Number(localStorage.getItem(STORAGE_GLOW_WIDTH));
+  const sizeRaw = Number(localStorage.getItem(STORAGE_GLOW_SIZE));
+  const intensityRaw = Number(localStorage.getItem(STORAGE_GLOW_INTENSITY));
+  return {
+    enabled: enabledRaw === null ? true : enabledRaw === "1",
+    static: staticRaw === null ? DEFAULT_GLOW_STATIC : staticRaw === "1",
+    width: Number.isFinite(widthRaw) ? widthRaw : DEFAULT_GLOW_WIDTH,
+    size: Number.isFinite(sizeRaw) ? sizeRaw : DEFAULT_GLOW_SIZE,
+    intensity: Number.isFinite(intensityRaw) ? intensityRaw : DEFAULT_GLOW_INTENSITY,
+  };
+}
+
+/** Push edge-glow prefs into the document. Safe to call repeatedly — used
+ *  on startup and on every control change so updates feel instant. */
+function applyGlowSettings(settings = getGlowSettings()) {
+  const root = document.documentElement;
+  root.classList.toggle("glow-disabled", !settings.enabled);
+  root.classList.toggle("glow-static", settings.static);
+
+  // Width 0–100 → 0–6 px rim thickness. 25 → 1.5px (the original).
+  const width = Math.max(0, Math.min(100, settings.width));
+  const widthPx = (width / 100) * 6;
+  root.style.setProperty("--glow-rim-width", `${widthPx}px`);
+
+  // Size 0–100 → mask stops. At size = 50 the stops match the pre-settings
+  // visual (inner 30%, outer 70%). Bigger size pulls both stops toward the
+  // center, so the glow extends further inward; smaller size compresses
+  // them against the perimeter for a thin edge-only ring.
+  const size = Math.max(0, Math.min(100, settings.size));
+  const innerStop = 60 - 0.6 * size;              // 60% → 0%
+  const outerStop = Math.min(95, innerStop + 40); // 40-percentage-point ramp width
+  root.style.setProperty("--glow-stop-inner", `${innerStop}%`);
+  root.style.setProperty("--glow-stop-outer", `${outerStop}%`);
+
+  // Intensity 0–100 → opacity multiplier 0–1 on both layers.
+  const intensity = Math.max(0, Math.min(100, settings.intensity)) / 100;
+  root.style.setProperty("--glow-intensity", String(intensity));
+}
+
+// ─── Global (system-wide) shortcuts ───
+// Two roles, each customizable:
+//   - "capture": brings the window to front and emits "quick-capture"
+//   - "toggle":  shows/hides the main window depending on visibility/focus
+// Stored as Tauri accelerator strings (e.g. "Ctrl+Cmd+Alt+Shift+KeyN") in
+// localStorage and re-applied on every app start.
+const GS_ROLE_CAPTURE = "capture";
+const GS_ROLE_TOGGLE = "toggle";
+const STORAGE_GS_CAPTURE = "raynote-global-shortcut-capture";
+const STORAGE_GS_TOGGLE = "raynote-global-shortcut-toggle";
+const DEFAULT_GS_CAPTURE = "Ctrl+Cmd+Alt+Shift+KeyN";
+const DEFAULT_GS_TOGGLE = "Ctrl+Cmd+Alt+Shift+KeyM";
+
+function getGlobalShortcutAccelerator(role) {
+  const key = role === GS_ROLE_CAPTURE ? STORAGE_GS_CAPTURE : STORAGE_GS_TOGGLE;
+  const fallback =
+    role === GS_ROLE_CAPTURE ? DEFAULT_GS_CAPTURE : DEFAULT_GS_TOGGLE;
+  return localStorage.getItem(key) || fallback;
+}
+
+function setGlobalShortcutAccelerator(role, accelerator) {
+  const key = role === GS_ROLE_CAPTURE ? STORAGE_GS_CAPTURE : STORAGE_GS_TOGGLE;
+  const fallback =
+    role === GS_ROLE_CAPTURE ? DEFAULT_GS_CAPTURE : DEFAULT_GS_TOGGLE;
+  if (accelerator === fallback) {
+    localStorage.removeItem(key);
+  } else {
+    localStorage.setItem(key, accelerator);
+  }
+}
+
+/** Convert a KeyboardEvent into an accelerator string the Rust side understands. */
+function eventToAccelerator(e) {
+  const parts = [];
+  if (e.ctrlKey) parts.push("Ctrl");
+  if (e.metaKey) parts.push("Cmd");
+  if (e.altKey) parts.push("Alt");
+  if (e.shiftKey) parts.push("Shift");
+  // KeyboardEvent.code gives stable codes ("KeyN", "Digit1", "F1", "Space", …)
+  // which is exactly what the global-shortcut plugin's parser accepts.
+  parts.push(e.code);
+  return parts.join("+");
+}
+
+/** Translate an accelerator string into pretty key labels for display. */
+function acceleratorToParts(accel) {
+  return accel.split("+").map((p) => {
+    if (p === "Ctrl" || p === "Control") return "⌃";
+    if (p === "Cmd" || p === "Command" || p === "Meta" || p === "Super") return "⌘";
+    if (p === "Alt" || p === "Option") return "⌥";
+    if (p === "Shift") return "⇧";
+    if (p.startsWith("Key")) return p.slice(3); // "KeyN" → "N"
+    if (p.startsWith("Digit")) return p.slice(5); // "Digit1" → "1"
+    if (p === "Space") return "Space";
+    if (p === "Enter") return "↵";
+    if (p === "Backspace") return "⌫";
+    if (p === "Escape") return "Esc";
+    if (p === "Tab") return "⇥";
+    return p;
+  });
+}
+
+/** True if the event represents a usable shortcut combination. */
+function isAcceleratorComplete(e) {
+  // Bare modifier presses produce no useful accelerator on their own.
+  if (["Meta", "Control", "Alt", "Shift"].includes(e.key)) return false;
+  // Refuse a key with no modifiers — global shortcuts must be modified.
+  return e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
+}
+
+/** Apply the user's saved global shortcuts (or defaults) by calling the Rust command. */
+async function applyGlobalShortcuts() {
+  for (const role of [GS_ROLE_CAPTURE, GS_ROLE_TOGGLE]) {
+    const accelerator = getGlobalShortcutAccelerator(role);
+    try {
+      await invoke("set_global_shortcut", { role, accelerator });
+    } catch (err) {
+      // Don't block startup — log so dev sees it; user can pick a new combo.
+      console.warn(`Global shortcut "${role}" (${accelerator}) failed:`, err);
+    }
+  }
+}
+
 function hasAutoTitlePlaceholder(content) {
   const firstLine = (content || "").split("\n")[0];
   return firstLine.includes(AUTO_TITLE_PLACEHOLDER);
@@ -131,6 +273,10 @@ const stickyNoteId = urlParams.get("id");
 if (isSticky) {
   document.documentElement.classList.add("sticky-mode");
 }
+
+// Apply persisted edge-glow prefs as early as possible so the rim renders
+// in its configured state on first paint instead of flashing the default.
+applyGlowSettings();
 
 /** Fade out and remove the inline splash from index.html. Idempotent. */
 function hideSplash() {
@@ -527,6 +673,7 @@ const state = {
   selectedPaletteIndex: 0,
   settingsOpen: false,
   recordingShortcut: null, // shortcut id being recorded
+  recordingGlobalShortcut: null, // global shortcut role being recorded ("capture" | "toggle")
   shortcuts: loadShortcuts(),
 };
 
@@ -701,6 +848,51 @@ function createSettingsPanel() {
             </div>
           </div>
           <div class="settings-section">
+            <div class="settings-section-title">Edge Glow</div>
+            <div class="settings-section-desc">A soft red rim that slowly sweeps around the window. Freeze it at the top, resize it, dim it, or turn it off entirely.</div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-label">Enable</span>
+                <span class="setting-desc">Show the rim and the inner glow</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-glow-enabled" />
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-label">Static</span>
+                <span class="setting-desc">Stop the sweep — keep a fixed glow centered at the top</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-glow-static" />
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+            </div>
+            <div class="setting-row setting-row-stacked">
+              <div class="setting-info">
+                <span class="setting-label">Width</span>
+                <span class="setting-desc">Thickness of the crisp rim line on the edge</span>
+              </div>
+              <input type="range" id="setting-glow-width" class="setting-range" min="0" max="100" step="1" />
+            </div>
+            <div class="setting-row setting-row-stacked">
+              <div class="setting-info">
+                <span class="setting-label">Size</span>
+                <span class="setting-desc">How far the inner glow reaches toward the center</span>
+              </div>
+              <input type="range" id="setting-glow-size" class="setting-range" min="0" max="100" step="1" />
+            </div>
+            <div class="setting-row setting-row-stacked">
+              <div class="setting-info">
+                <span class="setting-label">Intensity</span>
+                <span class="setting-desc">How strong the glow looks overall</span>
+              </div>
+              <input type="range" id="setting-glow-intensity" class="setting-range" min="0" max="100" step="1" />
+            </div>
+          </div>
+          <div class="settings-section">
             <div class="settings-section-title">New Notes</div>
             <div class="setting-row setting-row-stacked">
               <div class="setting-info">
@@ -715,16 +907,18 @@ function createSettingsPanel() {
             </div>
           </div>
           <div class="settings-section">
-            <div class="settings-section-title">System</div>
-            <div class="setting-row">
+            <div class="settings-section-title">Global Shortcuts</div>
+            <div class="settings-section-desc">System-wide hotkeys that work even when Raynote isn't focused. Click to record, press Escape to cancel.</div>
+            <div id="global-shortcuts-list"></div>
+            <div class="setting-row" id="global-shortcut-error" style="display: none;">
               <div class="setting-info">
-                <span class="setting-label">Global Shortcut</span>
-                <span class="setting-desc">Summon Raynote from anywhere on your Mac</span>
-              </div>
-              <div class="setting-keys">
-                <kbd>Ctrl</kbd><span class="shortcut-plus">+</span><kbd>Cmd</kbd><span class="shortcut-plus">+</span><kbd>Option</kbd><span class="shortcut-plus">+</span><kbd>Shift</kbd><span class="shortcut-plus">+</span><kbd>N</kbd>
+                <span class="setting-label" style="color: var(--danger);">Shortcut conflict</span>
+                <span class="setting-desc" id="global-shortcut-error-msg"></span>
               </div>
             </div>
+          </div>
+          <div class="settings-section">
+            <div class="settings-section-title">System</div>
             <div class="setting-row">
               <div class="setting-info">
                 <span class="setting-label">Storage</span>
@@ -808,6 +1002,35 @@ function createSettingsPanel() {
     invoke("set_dock_visible", { visible: !hide });
   });
 
+  // Edge-glow controls — persist + apply live so the rim updates as the
+  // user drags the sliders or flips the toggles.
+  const glowEnabled = panel.querySelector("#toggle-glow-enabled");
+  const glowStatic = panel.querySelector("#toggle-glow-static");
+  const glowWidth = panel.querySelector("#setting-glow-width");
+  const glowSize = panel.querySelector("#setting-glow-size");
+  const glowIntensity = panel.querySelector("#setting-glow-intensity");
+
+  glowEnabled.addEventListener("change", () => {
+    localStorage.setItem(STORAGE_GLOW_ENABLED, glowEnabled.checked ? "1" : "0");
+    applyGlowSettings();
+  });
+  glowStatic.addEventListener("change", () => {
+    localStorage.setItem(STORAGE_GLOW_STATIC, glowStatic.checked ? "1" : "0");
+    applyGlowSettings();
+  });
+  glowWidth.addEventListener("input", () => {
+    localStorage.setItem(STORAGE_GLOW_WIDTH, glowWidth.value);
+    applyGlowSettings();
+  });
+  glowSize.addEventListener("input", () => {
+    localStorage.setItem(STORAGE_GLOW_SIZE, glowSize.value);
+    applyGlowSettings();
+  });
+  glowIntensity.addEventListener("input", () => {
+    localStorage.setItem(STORAGE_GLOW_INTENSITY, glowIntensity.value);
+    applyGlowSettings();
+  });
+
   // New-note title mode
   panel
     .querySelector("#setting-new-note-title-mode")
@@ -849,6 +1072,13 @@ function openSettings() {
   // Restore dock toggle state
   const dockHidden = localStorage.getItem("raynote-hide-dock") === "1";
   document.getElementById("toggle-dock-hide").checked = dockHidden;
+  // Restore edge-glow controls
+  const glow = getGlowSettings();
+  document.getElementById("toggle-glow-enabled").checked = glow.enabled;
+  document.getElementById("toggle-glow-static").checked = glow.static;
+  document.getElementById("setting-glow-width").value = String(glow.width);
+  document.getElementById("setting-glow-size").value = String(glow.size);
+  document.getElementById("setting-glow-intensity").value = String(glow.intensity);
   // Restore new-note title mode
   document.getElementById("setting-new-note-title-mode").value =
     getNewNoteTitleMode();
@@ -860,12 +1090,146 @@ function openSettings() {
   document.getElementById("setting-ai-base-url").value =
     ai.baseUrl === DEFAULT_AI_BASE_URL ? "" : ai.baseUrl;
   renderShortcutsList();
+  renderGlobalShortcutsList();
 }
 
 function closeSettings() {
   state.settingsOpen = false;
   state.recordingShortcut = null;
+  state.recordingGlobalShortcut = null;
+  hideGlobalShortcutError();
   settingsPanel.classList.add("hidden");
+}
+
+const GLOBAL_SHORTCUT_LABELS = {
+  [GS_ROLE_CAPTURE]: {
+    label: "Quick Capture",
+    desc: "Show Raynote and start a fresh note from anywhere",
+  },
+  [GS_ROLE_TOGGLE]: {
+    label: "Toggle Window",
+    desc: "Show or hide the main Raynote window",
+  },
+};
+
+function showGlobalShortcutError(msg) {
+  const row = document.getElementById("global-shortcut-error");
+  const out = document.getElementById("global-shortcut-error-msg");
+  if (!row || !out) return;
+  out.textContent = msg;
+  row.style.display = "";
+}
+
+function hideGlobalShortcutError() {
+  const row = document.getElementById("global-shortcut-error");
+  if (row) row.style.display = "none";
+}
+
+function renderGlobalShortcutsList() {
+  const list = document.getElementById("global-shortcuts-list");
+  if (!list) return;
+  list.innerHTML = [GS_ROLE_CAPTURE, GS_ROLE_TOGGLE]
+    .map((role) => {
+      const meta = GLOBAL_SHORTCUT_LABELS[role];
+      const accel = getGlobalShortcutAccelerator(role);
+      const isRecording = state.recordingGlobalShortcut === role;
+      const defaultAccel =
+        role === GS_ROLE_CAPTURE ? DEFAULT_GS_CAPTURE : DEFAULT_GS_TOGGLE;
+      const isModified = accel !== defaultAccel;
+      return `
+        <div class="shortcut-row ${isRecording ? "recording" : ""}" data-role="${role}">
+          <div class="setting-info">
+            <span class="shortcut-label">${escapeHtml(meta.label)}</span>
+            <span class="setting-desc">${escapeHtml(meta.desc)}</span>
+          </div>
+          <div class="shortcut-keys-area">
+            ${
+              isModified
+                ? `<button class="shortcut-reset-btn" data-role="${role}" data-action="reset" title="Reset to default">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2 2v5h5M14 14v-5H9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 6A6 6 0 003.3 3.3L2 7m12 3l-1.3 3.7A6 6 0 012.5 10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>`
+                : ""
+            }
+            <button class="shortcut-key-btn ${isRecording ? "recording" : ""}" data-role="${role}" data-action="record">
+              ${
+                isRecording
+                  ? '<span class="recording-pulse"></span>Press keys...'
+                  : acceleratorToParts(accel)
+                      .map((k) => `<kbd>${escapeHtml(k)}</kbd>`)
+                      .join('<span class="shortcut-plus">+</span>')
+              }
+            </button>
+          </div>
+        </div>`;
+    })
+    .join("");
+
+  list.querySelectorAll('[data-action="record"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      hideGlobalShortcutError();
+      state.recordingGlobalShortcut = btn.dataset.role;
+      // Cancel any in-progress app-shortcut recording so the two don't fight.
+      state.recordingShortcut = null;
+      renderShortcutsList();
+      renderGlobalShortcutsList();
+    });
+  });
+
+  list.querySelectorAll('[data-action="reset"]').forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const role = btn.dataset.role;
+      const def =
+        role === GS_ROLE_CAPTURE ? DEFAULT_GS_CAPTURE : DEFAULT_GS_TOGGLE;
+      try {
+        await invoke("set_global_shortcut", { role, accelerator: def });
+        setGlobalShortcutAccelerator(role, def);
+        hideGlobalShortcutError();
+      } catch (err) {
+        showGlobalShortcutError(String(err));
+      }
+      renderGlobalShortcutsList();
+    });
+  });
+}
+
+// Sync wrapper so the keydown handler can short-circuit cleanly.
+// Registration is async, but interception is decided synchronously.
+function handleGlobalShortcutRecording(e) {
+  if (!state.recordingGlobalShortcut) return false;
+  e.preventDefault();
+  e.stopPropagation();
+
+  if (e.key === "Escape") {
+    state.recordingGlobalShortcut = null;
+    renderGlobalShortcutsList();
+    return true;
+  }
+
+  if (!isAcceleratorComplete(e)) return true;
+
+  const role = state.recordingGlobalShortcut;
+  const accelerator = eventToAccelerator(e);
+  state.recordingGlobalShortcut = null;
+  renderGlobalShortcutsList();
+
+  // Fire-and-forget the actual registration; UI already reflects the attempt.
+  (async () => {
+    try {
+      await invoke("set_global_shortcut", { role, accelerator });
+      setGlobalShortcutAccelerator(role, accelerator);
+      hideGlobalShortcutError();
+    } catch (err) {
+      // Typically: another running app or macOS owns this combo.
+      // Old binding stays in place because Rust bails before unregistering.
+      showGlobalShortcutError(
+        `Couldn't bind ${acceleratorToParts(accelerator).join("+")} — ${err}. Try a different combination.`,
+      );
+    }
+    renderGlobalShortcutsList();
+  })();
+
+  return true;
 }
 
 function renderShortcutsList() {
@@ -961,6 +1325,10 @@ async function init() {
     if (localStorage.getItem("raynote-hide-dock") === "1") {
       invoke("set_dock_visible", { visible: false });
     }
+    // Re-apply any user-customized global shortcuts. Defaults are already
+    // registered by the Rust setup; this only does work if the user picked
+    // something else. Fire-and-forget so we don't block the splash.
+    applyGlobalShortcuts();
   }
 
   if (isSticky && stickyNoteId) {
@@ -2335,6 +2703,7 @@ function setupEventListeners() {
   // Global keyboard shortcuts
   document.addEventListener("keydown", (e) => {
     // Shortcut recording intercepts everything
+    if (handleGlobalShortcutRecording(e)) return;
     if (handleShortcutRecording(e)) return;
 
     const sc = state.shortcuts;
