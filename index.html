@@ -3,10 +3,86 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>LeviNote</title>
+    <title>Raynote</title>
+    <style>
+      /* Inline splash — paints on the first frame, before style.css or main.js
+         have finished loading. Hidden by main.js once init() completes. */
+      html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+      #splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(18, 18, 24, 0.82);
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 8px 40px rgba(0, 0, 0, 0.55), 0 2px 12px rgba(0, 0, 0, 0.3);
+        -webkit-backdrop-filter: blur(20px) saturate(140%);
+        backdrop-filter: blur(20px) saturate(140%);
+        font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif;
+        color: rgba(255, 255, 255, 0.92);
+        transition: opacity 260ms ease;
+        pointer-events: none;
+      }
+      #splash.hidden { opacity: 0; }
+      .splash-content {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
+      }
+      .splash-logo {
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        background: linear-gradient(135deg, #ffffff 0%, #7c6ff7 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        animation: splash-pulse 1.6s ease-in-out infinite;
+      }
+      .splash-bar {
+        position: relative;
+        width: 140px;
+        height: 2px;
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 1px;
+        overflow: hidden;
+      }
+      .splash-bar::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: -40%;
+        width: 40%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, #7c6ff7, transparent);
+        animation: splash-slide 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+      }
+      @keyframes splash-pulse {
+        0%, 100% { opacity: 0.65; }
+        50% { opacity: 1; }
+      }
+      @keyframes splash-slide {
+        0% { transform: translateX(0); }
+        100% { transform: translateX(350%); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .splash-logo { animation: none; opacity: 0.9; }
+        .splash-bar::after { animation-duration: 2.4s; }
+      }
+    </style>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+    <div id="splash" aria-hidden="true">
+      <div class="splash-content">
+        <div class="splash-logo">Raynote</div>
+        <div class="splash-bar"></div>
+      </div>
+    </div>
     <div id="app">
       <div id="titlebar" data-tauri-drag-region>
         <div class="titlebar-left">
@@ -16,7 +92,7 @@
               <rect x="7" y="2" width="8" height="12" rx="1" stroke="currentColor" stroke-width="1.2"/>
             </svg>
           </button>
-          <span class="titlebar-title" id="titlebar-title">LeviNote</span>
+          <span class="titlebar-title" id="titlebar-title">Raynote</span>
           <div id="sticky-tint-picker" class="sticky-tint-picker"></div>
           <div class="titlebar-drag-spacer" data-tauri-drag-region aria-hidden="true"></div>
         </div>
@@ -68,5 +144,16 @@
     </div>
 
     <script type="module" src="/src/main.js"></script>
+    <script>
+      // Safety net — if init() throws or hangs, drop the splash after 8s so the
+      // user is never staring at a frozen loader. Normal path hides it from main.js.
+      setTimeout(function () {
+        var s = document.getElementById("splash");
+        if (s && !s.classList.contains("hidden")) {
+          s.classList.add("hidden");
+          setTimeout(function () { s.remove(); }, 300);
+        }
+      }, 8000);
+    </script>
   </body>
 </html>

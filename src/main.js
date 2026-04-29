@@ -9,11 +9,135 @@ import katex from "katex";
 import "katex/dist/katex.min.css";
 import "./style.css";
 
+// ─── Auto-title generation ───
+const AUTO_TITLE_PLACEHOLDER = "{{auto_generate}}";
+const STORAGE_AI_API_KEY = "raynote-ai-api-key";
+const STORAGE_AI_MODEL = "raynote-ai-model";
+const STORAGE_AI_BASE_URL = "raynote-ai-base-url";
+const STORAGE_NEW_NOTE_TITLE_MODE = "raynote-new-note-title-mode";
+
+const DEFAULT_AI_MODEL = "openai/gpt-oss-20b";
+const DEFAULT_AI_BASE_URL = "https://openrouter.ai/api/v1";
+
+/** New-note title behavior: "auto" | "manual" | "empty". */
+const TITLE_MODE_AUTO = "auto";
+const TITLE_MODE_MANUAL = "manual";
+const TITLE_MODE_EMPTY = "empty";
+const DEFAULT_NEW_NOTE_TITLE_MODE = TITLE_MODE_AUTO;
+
+function getAISettings() {
+  return {
+    apiKey: localStorage.getItem(STORAGE_AI_API_KEY) || "",
+    model: localStorage.getItem(STORAGE_AI_MODEL) || DEFAULT_AI_MODEL,
+    baseUrl: localStorage.getItem(STORAGE_AI_BASE_URL) || DEFAULT_AI_BASE_URL,
+  };
+}
+
+function getNewNoteTitleMode() {
+  const v = localStorage.getItem(STORAGE_NEW_NOTE_TITLE_MODE);
+  if (v === TITLE_MODE_AUTO || v === TITLE_MODE_MANUAL || v === TITLE_MODE_EMPTY) {
+    return v;
+  }
+  return DEFAULT_NEW_NOTE_TITLE_MODE;
+}
+
+function hasAutoTitlePlaceholder(content) {
+  const firstLine = (content || "").split("\n")[0];
+  return firstLine.includes(AUTO_TITLE_PLACEHOLDER);
+}
+
+/** Note IDs currently being title-generated — prevents duplicate in-flight requests. */
+const titleGenerationsInFlight = new Set();
+
+/**
+ * Generate a title for a note using the configured AI provider.
+ * Runs in the background — replaces the {{auto_generate}} placeholder
+ * in the saved file and updates the sidebar / titlebar.
+ */
+async function autoGenerateTitle(noteId, content) {
+  if (titleGenerationsInFlight.has(noteId)) return;
+
+  const ai = getAISettings();
+  if (!ai.apiKey) return;
+
+  const bodyContent = content.split("\n").slice(1).join("\n").trim();
+  if (!bodyContent) return;
+
+  titleGenerationsInFlight.add(noteId);
+  try {
+    const res = await fetch(`${ai.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${ai.apiKey}`,
+        "HTTP-Referer": "https://raynote.app",
+        "X-Title": "Raynote",
+      },
+      body: JSON.stringify({
+        model: ai.model,
+        messages: [
+          {
+            role: "system",
+            content:
+              "Generate a short, descriptive title (3-8 words) for the following note. " +
+              "Respond with ONLY the title text — no quotes, no markdown, no punctuation at the end.",
+          },
+          { role: "user", content: bodyContent.slice(0, 2000) },
+        ],
+        max_tokens: 512,
+      }),
+    });
+
+    if (!res.ok) return;
+
+    const data = await res.json();
+    const title = (data.choices?.[0]?.message?.content || "").trim();
+    if (!title) return;
+
+    // Replace placeholder in the file content
+    const updatedContent = content.replace(
+      new RegExp(`#\\s*${AUTO_TITLE_PLACEHOLDER.replace(/[{}]/g, "\\$&")}`),
+      `# ${title}`,
+    );
+
+    // Persist to disk
+    await invoke("save_note", { id: noteId, content: updatedContent });
+
+    // If user is currently viewing this note, update the editor too
+    if (state.currentId === noteId) {
+      const pos = editor.selectionStart;
+      editor.value = updatedContent;
+      editor.selectionStart = editor.selectionEnd = pos;
+      invalidatePreviewCache(noteId);
+    }
+
+    // Update sidebar metadata
+    const idx = state.notes.findIndex((n) => n.id === noteId);
+    if (idx >= 0) {
+      state.notes[idx].title = title;
+      renderNoteList(state.searchQuery);
+      updateTitle();
+    }
+  } catch (_) {
+    // Silently fail — user can always rename manually
+  } finally {
+    titleGenerationsInFlight.delete(noteId);
+  }
+}
+
 const urlParams = new URLSearchParams(window.location.search);
 const isSticky = urlParams.get("sticky") === "1";
 const stickyNoteId = urlParams.get("id");
 if (isSticky) {
   document.documentElement.classList.add("sticky-mode");
+}
+
+/** Fade out and remove the inline splash from index.html. Idempotent. */
+function hideSplash() {
+  const splash = document.getElementById("splash");
+  if (!splash || splash.classList.contains("hidden")) return;
+  splash.classList.add("hidden");
+  setTimeout(() => splash.remove(), 300);
 }
 
 /** Main window hides; sticky windows are destroyed so they do not respawn on global shortcuts. */
@@ -27,13 +151,48 @@ function closeCurrentWindow() {
 
 /** Subtle dark glass tints (gradient stops on #app); kept low-chroma for readability. */
 const STICKY_TINT_PRESETS = [
-  { id: "mist", label: "Mist", c1: "rgba(20, 22, 28, 0.92)", c2: "rgba(15, 17, 22, 0.90)" },
-  { id: "lavender", label: "Lavender", c1: "rgba(24, 21, 30, 0.92)", c2: "rgba(17, 16, 24, 0.90)" },
-  { id: "rose", label: "Rose", c1: "rgba(28, 20, 23, 0.92)", c2: "rgba(21, 17, 19, 0.90)" },
-  { id: "clay", label: "Clay", c1: "rgba(28, 22, 19, 0.92)", c2: "rgba(22, 18, 16, 0.90)" },
-  { id: "mint", label: "Mint", c1: "rgba(18, 24, 22, 0.92)", c2: "rgba(15, 20, 19, 0.90)" },
-  { id: "olive", label: "Olive", c1: "rgba(24, 25, 19, 0.92)", c2: "rgba(19, 20, 16, 0.90)" },
-  { id: "sky", label: "Sky", c1: "rgba(18, 22, 30, 0.92)", c2: "rgba(15, 18, 24, 0.90)" },
+  {
+    id: "mist",
+    label: "Mist",
+    c1: "rgba(20, 22, 28, 0.92)",
+    c2: "rgba(15, 17, 22, 0.90)",
+  },
+  {
+    id: "lavender",
+    label: "Lavender",
+    c1: "rgba(24, 21, 30, 0.92)",
+    c2: "rgba(17, 16, 24, 0.90)",
+  },
+  {
+    id: "rose",
+    label: "Rose",
+    c1: "rgba(28, 20, 23, 0.92)",
+    c2: "rgba(21, 17, 19, 0.90)",
+  },
+  {
+    id: "clay",
+    label: "Clay",
+    c1: "rgba(28, 22, 19, 0.92)",
+    c2: "rgba(22, 18, 16, 0.90)",
+  },
+  {
+    id: "mint",
+    label: "Mint",
+    c1: "rgba(18, 24, 22, 0.92)",
+    c2: "rgba(15, 20, 19, 0.90)",
+  },
+  {
+    id: "olive",
+    label: "Olive",
+    c1: "rgba(24, 25, 19, 0.92)",
+    c2: "rgba(19, 20, 16, 0.90)",
+  },
+  {
+    id: "sky",
+    label: "Sky",
+    c1: "rgba(18, 22, 30, 0.92)",
+    c2: "rgba(15, 18, 24, 0.90)",
+  },
 ];
 
 const STICKY_TINT_LEGACY = { peach: "clay", butter: "olive" };
@@ -120,9 +279,11 @@ function parseImageAlt(raw) {
 
 function imageAlignStyle(width, align) {
   const margin =
-    align === "left" ? "0 auto 0 0" :
-    align === "right" ? "0 0 0 auto" :
-    "0 auto";
+    align === "left"
+      ? "0 auto 0 0"
+      : align === "right"
+        ? "0 0 0 auto"
+        : "0 auto";
   return `width:${width};margin:${margin};display:block`;
 }
 
@@ -166,7 +327,9 @@ const assetLinkRenderer = {
     // Render all other links with a data attribute so we can open them externally
     const url = escapeHtml(href);
     const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
-    const label = token.tokens ? this.parser.parseInline(token.tokens) : escapeHtml(token.text || href);
+    const label = token.tokens
+      ? this.parser.parseInline(token.tokens)
+      : escapeHtml(token.text || href);
     return `<a class="external-link" href="#" data-url="${url}"${title}>${label}</a>`;
   },
 };
@@ -202,7 +365,9 @@ const codeRenderer = {
 
 // ─── Configure marked ───
 marked.use({ extensions: [latexBlock, latexInline] });
-marked.use({ renderer: { ...codeRenderer, ...imageRenderer, ...assetLinkRenderer } });
+marked.use({
+  renderer: { ...codeRenderer, ...imageRenderer, ...assetLinkRenderer },
+});
 marked.setOptions({
   breaks: true,
   gfm: true,
@@ -210,25 +375,55 @@ marked.setOptions({
 
 // ─── Shortcuts system ───
 const defaultShortcuts = {
-  newNote:        { label: "New Note",             key: "n", meta: true },
-  newSticky:      { label: "Open Sticky (this note)", key: "n", meta: true, shift: true },
-  deleteNote:     { label: "Delete Note",          key: "Backspace", meta: true, shift: true },
-  toggleEdit:     { label: "Toggle Edit/Preview",  key: "e", meta: true },
-  toggleSidebar:  { label: "Toggle Sidebar",       key: "s", meta: true, shift: true },
-  save:           { label: "Save Note",            key: "s", meta: true },
-  closeWindow:    { label: "Close Window",         key: "w", meta: true },
-  openPalette:    { label: "Search Notes",         key: "k", meta: true },
-  commandPalette: { label: "Command Palette",      key: "p", meta: true, shift: true },
-  pinWindow:      { label: "Pin Window on Top",    key: "t", meta: true, shift: true },
-  copyNote:       { label: "Copy Note as Markdown", key: "c", meta: true, shift: true },
-  undoDelete:     { label: "Undo Delete Note",     key: "Tab", meta: true, shift: true },
-  pinNote:        { label: "Pin/Unpin Note",       key: "p", meta: true, alt: true },
-  settings:       { label: "Settings",             key: ",", meta: true },
+  newNote: { label: "New Note", key: "n", meta: true },
+  newSticky: {
+    label: "Open Sticky (this note)",
+    key: "n",
+    meta: true,
+    shift: true,
+  },
+  deleteNote: {
+    label: "Delete Note",
+    key: "Backspace",
+    meta: true,
+    shift: true,
+  },
+  toggleEdit: { label: "Toggle Edit/Preview", key: "e", meta: true },
+  toggleSidebar: { label: "Toggle Sidebar", key: "s", meta: true, shift: true },
+  save: { label: "Save Note", key: "s", meta: true },
+  closeWindow: { label: "Close Window", key: "w", meta: true },
+  openPalette: { label: "Search Notes", key: "k", meta: true },
+  commandPalette: {
+    label: "Command Palette",
+    key: "p",
+    meta: true,
+    shift: true,
+  },
+  pinWindow: { label: "Pin Window on Top", key: "t", meta: true, shift: true },
+  copyNote: {
+    label: "Copy Note as Markdown",
+    key: "c",
+    meta: true,
+    shift: true,
+  },
+  undoDelete: { label: "Undo Delete Note", key: "z", meta: true, shift: true },
+  redoDelete: {
+    label: "Redo Delete Note",
+    key: "z",
+    meta: true,
+    shift: true,
+    alt: true,
+  },
+  viewTrash: { label: "View Trash", key: "Backspace", meta: true, alt: true },
+  pinNote: { label: "Pin/Unpin Note", key: "p", meta: true, alt: true },
+  settings: { label: "Settings", key: ",", meta: true },
 };
 
 function loadShortcuts() {
   try {
-    const saved = JSON.parse(localStorage.getItem("levinote-shortcuts") || "{}");
+    const saved = JSON.parse(
+      localStorage.getItem("raynote-shortcuts") || "{}",
+    );
     return { ...structuredClone(defaultShortcuts), ...saved };
   } catch {
     return structuredClone(defaultShortcuts);
@@ -239,11 +434,23 @@ function saveShortcuts(shortcuts) {
   const toSave = {};
   for (const [id, sc] of Object.entries(shortcuts)) {
     const def = defaultShortcuts[id];
-    if (def && (sc.key !== def.key || !!sc.meta !== !!def.meta || !!sc.shift !== !!def.shift || !!sc.alt !== !!def.alt)) {
-      toSave[id] = { label: sc.label, key: sc.key, meta: !!sc.meta, shift: !!sc.shift, alt: !!sc.alt };
+    if (
+      def &&
+      (sc.key !== def.key ||
+        !!sc.meta !== !!def.meta ||
+        !!sc.shift !== !!def.shift ||
+        !!sc.alt !== !!def.alt)
+    ) {
+      toSave[id] = {
+        label: sc.label,
+        key: sc.key,
+        meta: !!sc.meta,
+        shift: !!sc.shift,
+        alt: !!sc.alt,
+      };
     }
   }
-  localStorage.setItem("levinote-shortcuts", JSON.stringify(toSave));
+  localStorage.setItem("raynote-shortcuts", JSON.stringify(toSave));
 }
 
 function formatShortcut(sc) {
@@ -251,7 +458,14 @@ function formatShortcut(sc) {
   if (sc.meta) parts.push("Cmd");
   if (sc.alt) parts.push("Alt");
   if (sc.shift) parts.push("Shift");
-  const keyName = sc.key === " " ? "Space" : sc.key === "," ? "," : sc.key.length === 1 ? sc.key.toUpperCase() : sc.key;
+  const keyName =
+    sc.key === " "
+      ? "Space"
+      : sc.key === ","
+        ? ","
+        : sc.key.length === 1
+          ? sc.key.toUpperCase()
+          : sc.key;
   parts.push(keyName);
   return parts.join("+");
 }
@@ -270,14 +484,16 @@ const PAGE_SIZE = 50;
 // ─── Pinned notes ───
 function loadPinnedNotes() {
   try {
-    return new Set(JSON.parse(localStorage.getItem("levinote-pinned-notes") || "[]"));
+    return new Set(
+      JSON.parse(localStorage.getItem("raynote-pinned-notes") || "[]"),
+    );
   } catch {
     return new Set();
   }
 }
 
 function savePinnedNotes(pinnedSet) {
-  localStorage.setItem("levinote-pinned-notes", JSON.stringify([...pinnedSet]));
+  localStorage.setItem("raynote-pinned-notes", JSON.stringify([...pinnedSet]));
 }
 
 function toggleNotePin(id) {
@@ -314,6 +530,35 @@ const state = {
   shortcuts: loadShortcuts(),
 };
 
+// ─── Preview HTML cache ───
+const previewCache = new Map(); // Map<noteId, { html: string, content: string }>
+const PREVIEW_CACHE_MAX = 20;
+let renderGeneration = 0; // monotonically increasing; guards against race conditions
+
+function cachePreviewHtml(noteId, content, html) {
+  // Evict oldest entry if at capacity (simple LRU via insertion order)
+  if (previewCache.size >= PREVIEW_CACHE_MAX && !previewCache.has(noteId)) {
+    const firstKey = previewCache.keys().next().value;
+    previewCache.delete(firstKey);
+  }
+  previewCache.set(noteId, { html, content });
+}
+
+function getCachedPreviewHtml(noteId, content) {
+  const entry = previewCache.get(noteId);
+  if (entry && entry.content === content) {
+    // Move to end (most recently used) for LRU
+    previewCache.delete(noteId);
+    previewCache.set(noteId, entry);
+    return entry.html;
+  }
+  return null;
+}
+
+function invalidatePreviewCache(noteId) {
+  previewCache.delete(noteId);
+}
+
 // ─── DOM refs ───
 const $ = (s) => document.querySelector(s);
 const editor = $("#editor");
@@ -325,6 +570,96 @@ const paletteInput = $("#palette-input");
 const paletteResults = $("#palette-results");
 const sidebar = $("#sidebar");
 const titlebarTitle = $("#titlebar-title");
+
+// ─── Event delegation (single listener instead of per-element) ───
+
+// Note list: one click handler for all note items and pin buttons
+noteList.addEventListener("click", (e) => {
+  const pinBtn = e.target.closest(".note-pin-btn");
+  if (pinBtn) {
+    e.stopPropagation();
+    toggleNotePin(pinBtn.dataset.pinId);
+    return;
+  }
+  const noteItem = e.target.closest(".note-item");
+  if (noteItem) {
+    selectNote(noteItem.dataset.id);
+  }
+});
+
+// Preview pane: one click handler for all interactive preview elements
+preview.addEventListener("click", (e) => {
+  // Code copy button
+  const copyBtn = e.target.closest(".code-copy-btn");
+  if (copyBtn) {
+    e.stopPropagation();
+    const code = copyBtn
+      .getAttribute("data-code")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'");
+    copyToClipboard(code);
+    copyBtn.classList.add("copied");
+    copyBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.5 3.5 7-7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    setTimeout(() => {
+      copyBtn.classList.remove("copied");
+      copyBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5" stroke="currentColor" stroke-width="1.3"/></svg>`;
+    }, 1500);
+    return;
+  }
+
+  // Collapsible code blocks via yellow dot
+  const yellowDot = e.target.closest(".dot-yellow[role='button']");
+  if (yellowDot) {
+    e.stopPropagation();
+    const codeWindow = yellowDot.closest(".code-window");
+    if (codeWindow) codeWindow.classList.toggle("collapsed");
+    return;
+  }
+
+  // Asset link
+  const assetLink = e.target.closest(".asset-link[data-asset]");
+  if (assetLink) {
+    e.preventDefault();
+    invoke("reveal_asset", { name: assetLink.dataset.asset }).catch(() => {
+      showCopyToast("Failed to open file");
+    });
+    return;
+  }
+
+  // External link
+  const extLink = e.target.closest(".external-link[data-url]");
+  if (extLink) {
+    e.preventDefault();
+    shellOpen(extLink.dataset.url).catch(() => {
+      showCopyToast("Failed to open link");
+    });
+    return;
+  }
+});
+
+// Preview pane: delegated change handler for todo checkboxes
+preview.addEventListener("change", (e) => {
+  const cb = e.target.closest('input[type="checkbox"]');
+  if (cb && cb.dataset.todoIndex !== undefined) {
+    toggleTodoInMarkdown(parseInt(cb.dataset.todoIndex, 10), cb.checked);
+  }
+});
+
+// Preview pane: delegated keydown handler for todo items
+preview.addEventListener("keydown", (e) => {
+  const todoItem = e.target.closest(".todo-item");
+  if (todoItem && (e.key === " " || e.key === "Enter")) {
+    e.preventDefault();
+    const cb = todoItem.querySelector('input[type="checkbox"]');
+    if (cb) {
+      cb.checked = !cb.checked;
+      cb.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }
+});
 
 // ─── Mode indicator ───
 const modeIndicator = document.createElement("div");
@@ -343,6 +678,7 @@ function createSettingsPanel() {
       <div class="settings-header">
         <div class="settings-tabs">
           <button class="settings-tab active" data-tab="general">General</button>
+          <button class="settings-tab" data-tab="ai">AI</button>
           <button class="settings-tab" data-tab="shortcuts">Shortcuts</button>
         </div>
         <button class="settings-close-btn" title="Close (Esc)">
@@ -365,11 +701,25 @@ function createSettingsPanel() {
             </div>
           </div>
           <div class="settings-section">
+            <div class="settings-section-title">New Notes</div>
+            <div class="setting-row setting-row-stacked">
+              <div class="setting-info">
+                <span class="setting-label">Title</span>
+                <span class="setting-desc">What appears in the title field when you create a new note. <strong>Auto-generate</strong> lets the AI write a title from your content (configure the provider in the AI tab). <strong>Write manually</strong> starts the cursor right after <code>#&nbsp;</code>. <strong>Skip</strong> creates an empty note with the cursor at the top.</span>
+              </div>
+              <select id="setting-new-note-title-mode" class="setting-input setting-select">
+                <option value="auto">Auto-generate from content</option>
+                <option value="manual">Write title manually</option>
+                <option value="empty">Skip — empty note</option>
+              </select>
+            </div>
+          </div>
+          <div class="settings-section">
             <div class="settings-section-title">System</div>
             <div class="setting-row">
               <div class="setting-info">
                 <span class="setting-label">Global Shortcut</span>
-                <span class="setting-desc">Summon LeviNote from anywhere on your Mac</span>
+                <span class="setting-desc">Summon Raynote from anywhere on your Mac</span>
               </div>
               <div class="setting-keys">
                 <kbd>Ctrl</kbd><span class="shortcut-plus">+</span><kbd>Cmd</kbd><span class="shortcut-plus">+</span><kbd>Option</kbd><span class="shortcut-plus">+</span><kbd>Shift</kbd><span class="shortcut-plus">+</span><kbd>N</kbd>
@@ -381,6 +731,38 @@ function createSettingsPanel() {
                 <span class="setting-desc">Notes sync via iCloud Drive automatically</span>
               </div>
               <span class="setting-badge">iCloud</span>
+            </div>
+          </div>
+        </div>
+        <div class="settings-page hidden" data-page="ai">
+          <div class="settings-section">
+            <div class="settings-section-title">Auto-Title</div>
+            <div class="settings-section-desc">When <em>New Notes → Title</em> is set to <strong>Auto-generate</strong>, new notes get a <code>{{auto_generate}}</code> heading so you can start typing immediately, and the title is generated from your content when you switch away. These credentials are unused for the other title modes.</div>
+            <div class="setting-row setting-row-stacked">
+              <div class="setting-info">
+                <span class="setting-label">API Key</span>
+                <span class="setting-desc">Your OpenRouter API key (or any OpenAI-compatible provider)</span>
+              </div>
+              <div class="setting-input-wrap">
+                <input type="password" id="setting-ai-api-key" class="setting-input" placeholder="sk-or-v1-..." spellcheck="false" autocomplete="off" />
+                <button class="setting-input-toggle" id="toggle-api-key-vis" title="Show / hide key" aria-label="Toggle key visibility">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3C4.4 3 1.4 5.4.5 8c.9 2.6 3.9 5 7.5 5s6.6-2.4 7.5-5c-.9-2.6-3.9-5-7.5-5Zm0 8.3A3.3 3.3 0 1 1 8 4.7a3.3 3.3 0 0 1 0 6.6Zm0-5.3a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z" fill="currentColor"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="setting-row setting-row-stacked">
+              <div class="setting-info">
+                <span class="setting-label">Model</span>
+                <span class="setting-desc">The model used to generate titles</span>
+              </div>
+              <input type="text" id="setting-ai-model" class="setting-input" placeholder="${DEFAULT_AI_MODEL}" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="setting-row setting-row-stacked">
+              <div class="setting-info">
+                <span class="setting-label">Base URL</span>
+                <span class="setting-desc">API endpoint (OpenAI-compatible <code>/chat/completions</code>)</span>
+              </div>
+              <input type="text" id="setting-ai-base-url" class="setting-input" placeholder="${DEFAULT_AI_BASE_URL}" spellcheck="false" autocomplete="off" />
             </div>
           </div>
         </div>
@@ -396,24 +778,62 @@ function createSettingsPanel() {
   `;
   document.getElementById("app").appendChild(panel);
 
-  panel.querySelector(".settings-backdrop").addEventListener("click", closeSettings);
-  panel.querySelector(".settings-close-btn").addEventListener("click", closeSettings);
+  panel
+    .querySelector(".settings-backdrop")
+    .addEventListener("click", closeSettings);
+  panel
+    .querySelector(".settings-close-btn")
+    .addEventListener("click", closeSettings);
 
   // Tab switching
   panel.querySelectorAll(".settings-tab").forEach((tab) => {
     tab.addEventListener("click", () => {
-      panel.querySelectorAll(".settings-tab").forEach((t) => t.classList.remove("active"));
+      panel
+        .querySelectorAll(".settings-tab")
+        .forEach((t) => t.classList.remove("active"));
       tab.classList.add("active");
-      panel.querySelectorAll(".settings-page").forEach((p) => p.classList.add("hidden"));
-      panel.querySelector(`.settings-page[data-page="${tab.dataset.tab}"]`).classList.remove("hidden");
+      panel
+        .querySelectorAll(".settings-page")
+        .forEach((p) => p.classList.add("hidden"));
+      panel
+        .querySelector(`.settings-page[data-page="${tab.dataset.tab}"]`)
+        .classList.remove("hidden");
     });
   });
 
   // Dock hide toggle
   panel.querySelector("#toggle-dock-hide").addEventListener("change", (e) => {
     const hide = e.target.checked;
-    localStorage.setItem("levinote-hide-dock", hide ? "1" : "0");
+    localStorage.setItem("raynote-hide-dock", hide ? "1" : "0");
     invoke("set_dock_visible", { visible: !hide });
+  });
+
+  // New-note title mode
+  panel
+    .querySelector("#setting-new-note-title-mode")
+    .addEventListener("change", (e) => {
+      localStorage.setItem(STORAGE_NEW_NOTE_TITLE_MODE, e.target.value);
+    });
+
+  // AI settings — persist on change
+  const aiKeyInput = panel.querySelector("#setting-ai-api-key");
+  const aiModelInput = panel.querySelector("#setting-ai-model");
+  const aiBaseUrlInput = panel.querySelector("#setting-ai-base-url");
+
+  aiKeyInput.addEventListener("input", () => {
+    localStorage.setItem(STORAGE_AI_API_KEY, aiKeyInput.value.trim());
+  });
+  aiModelInput.addEventListener("input", () => {
+    localStorage.setItem(STORAGE_AI_MODEL, aiModelInput.value.trim());
+  });
+  aiBaseUrlInput.addEventListener("input", () => {
+    localStorage.setItem(STORAGE_AI_BASE_URL, aiBaseUrlInput.value.trim());
+  });
+
+  // Toggle API key visibility
+  panel.querySelector("#toggle-api-key-vis").addEventListener("click", () => {
+    const isPassword = aiKeyInput.type === "password";
+    aiKeyInput.type = isPassword ? "text" : "password";
   });
 
   return panel;
@@ -427,8 +847,18 @@ function openSettings() {
   state.recordingShortcut = null;
   settingsPanel.classList.remove("hidden");
   // Restore dock toggle state
-  const dockHidden = localStorage.getItem("levinote-hide-dock") === "1";
+  const dockHidden = localStorage.getItem("raynote-hide-dock") === "1";
   document.getElementById("toggle-dock-hide").checked = dockHidden;
+  // Restore new-note title mode
+  document.getElementById("setting-new-note-title-mode").value =
+    getNewNoteTitleMode();
+  // Restore AI settings
+  const ai = getAISettings();
+  document.getElementById("setting-ai-api-key").value = ai.apiKey;
+  document.getElementById("setting-ai-model").value =
+    ai.model === DEFAULT_AI_MODEL ? "" : ai.model;
+  document.getElementById("setting-ai-base-url").value =
+    ai.baseUrl === DEFAULT_AI_BASE_URL ? "" : ai.baseUrl;
   renderShortcutsList();
 }
 
@@ -445,19 +875,34 @@ function renderShortcutsList() {
       const isRecording = state.recordingShortcut === id;
       const isModified = (() => {
         const def = defaultShortcuts[id];
-        return def && (sc.key !== def.key || !!sc.meta !== !!def.meta || !!sc.shift !== !!def.shift || !!sc.alt !== !!def.alt);
+        return (
+          def &&
+          (sc.key !== def.key ||
+            !!sc.meta !== !!def.meta ||
+            !!sc.shift !== !!def.shift ||
+            !!sc.alt !== !!def.alt)
+        );
       })();
       return `
         <div class="shortcut-row ${isRecording ? "recording" : ""}" data-id="${id}">
           <span class="shortcut-label">${escapeHtml(sc.label)}</span>
           <div class="shortcut-keys-area">
-            ${isModified ? `<button class="shortcut-reset-btn" data-id="${id}" title="Reset to default">
+            ${
+              isModified
+                ? `<button class="shortcut-reset-btn" data-id="${id}" title="Reset to default">
               <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2 2v5h5M14 14v-5H9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 6A6 6 0 003.3 3.3L2 7m12 3l-1.3 3.7A6 6 0 012.5 10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>` : ""}
+            </button>`
+                : ""
+            }
             <button class="shortcut-key-btn ${isRecording ? "recording" : ""}" data-id="${id}">
-              ${isRecording
-                ? '<span class="recording-pulse"></span>Press keys...'
-                : formatShortcut(sc).split("+").map(k => `<kbd>${escapeHtml(k)}</kbd>`).join('<span class="shortcut-plus">+</span>')}
+              ${
+                isRecording
+                  ? '<span class="recording-pulse"></span>Press keys...'
+                  : formatShortcut(sc)
+                      .split("+")
+                      .map((k) => `<kbd>${escapeHtml(k)}</kbd>`)
+                      .join('<span class="shortcut-plus">+</span>')
+              }
             </button>
           </div>
         </div>`;
@@ -513,17 +958,21 @@ function handleShortcutRecording(e) {
 // ─── Init ───
 async function init() {
   if (!isSticky) {
-    if (localStorage.getItem("levinote-hide-dock") === "1") {
+    if (localStorage.getItem("raynote-hide-dock") === "1") {
       invoke("set_dock_visible", { visible: false });
     }
   }
 
   if (isSticky && stickyNoteId) {
-    const raw = localStorage.getItem(`levinote-sticky-tint-${stickyNoteId}`);
+    const raw = localStorage.getItem(`raynote-sticky-tint-${stickyNoteId}`);
     applyStickyTintById(stickyTintIdFromStorage(raw) || "mist");
   }
 
   await loadNotes();
+
+  // Sidebar is now painted — drop the splash before we start fetching/rendering
+  // the first note. Markdown render uses the existing .preview-loading spinner.
+  hideSplash();
 
   if (isSticky) {
     state.sidebarOpen = false;
@@ -537,7 +986,8 @@ async function init() {
     // Check if note exists by trying to read it (may not be in paginated list)
     const stickyContent = await invoke("read_note", { id: stickyNoteId });
     if (!stickyContent) {
-      preview.innerHTML = '<div class="empty-state">This sticky could not be found.</div>';
+      preview.innerHTML =
+        '<div class="empty-state">This sticky could not be found.</div>';
       preview.classList.add("visible");
       editor.classList.remove("visible");
       setupEventListeners();
@@ -562,11 +1012,16 @@ async function init() {
 async function loadNotes() {
   state.searchQuery = "";
   search.value = "";
-  const result = await invoke("list_notes_paginated", { offset: 0, limit: PAGE_SIZE });
+  const result = await invoke("list_notes_paginated", {
+    offset: 0,
+    limit: PAGE_SIZE,
+  });
 
   // Ensure pinned notes are always loaded even if not in the first page
   const loadedIds = new Set(result.notes.map((n) => n.id));
-  const missingPinned = [...state.pinnedNotes].filter((id) => !loadedIds.has(id));
+  const missingPinned = [...state.pinnedNotes].filter(
+    (id) => !loadedIds.has(id),
+  );
   let pinnedExtras = [];
   if (missingPinned.length > 0) {
     // Fetch all notes to find the missing pinned ones (they could be old)
@@ -581,7 +1036,12 @@ async function loadNotes() {
 }
 
 async function loadMoreNotes() {
-  if (state.loadingMore || state.searchQuery || state.notesOffset >= state.totalNotes) return;
+  if (
+    state.loadingMore ||
+    state.searchQuery ||
+    state.notesOffset >= state.totalNotes
+  )
+    return;
   state.loadingMore = true;
   try {
     const result = await invoke("list_notes_paginated", {
@@ -604,26 +1064,99 @@ async function selectNote(id) {
     await saveCurrentNote();
   }
 
+  // If the note we're leaving still has the auto-title placeholder, generate a title in the background
+  if (state.currentId) {
+    const prevContent = editor.value;
+    const prevNoteId = state.currentId;
+    if (hasAutoTitlePlaceholder(prevContent)) {
+      autoGenerateTitle(prevNoteId, prevContent); // fire-and-forget
+    }
+  }
+
+  const prevId = state.currentId;
   state.currentId = id;
   const content = await invoke("read_note", { id });
   editor.value = content;
-  renderPreview(content);
-  setMode("preview");
-  renderNoteList(state.searchQuery);
+
+  // Update sidebar immediately (before any heavy render work)
+  updateNoteListActiveState(prevId, id);
   updateTitle();
+
+  // Empty note: show empty state instantly
+  if (!content || content.trim() === "") {
+    preview.innerHTML = '<div class="empty-state">Start writing...</div>';
+    setModeRaw("preview");
+    return;
+  }
+
+  // Cache hit: instant render, no blocking
+  const cachedHtml = getCachedPreviewHtml(id, content);
+  if (cachedHtml) {
+    if (codeObserver) { codeObserver.disconnect(); codeObserver = null; }
+    preview.innerHTML = cachedHtml;
+    lazyHighlightCodeBlocks();
+    lazyLoadAssetImages();
+    setupTodoAttributes();
+    setModeRaw("preview");
+    return;
+  }
+
+  // Cache miss: show spinner, yield to let the sidebar paint, then parse
+  preview.innerHTML = '<div class="preview-loading"></div>';
+  setModeRaw("preview");
+
+  const gen = ++renderGeneration;
+
+  // Double-yield: rAF ensures the browser has scheduled a paint,
+  // then setTimeout(0) runs after that paint completes
+  await new Promise((resolve) => {
+    requestAnimationFrame(() => setTimeout(resolve, 0));
+  });
+
+  // Guard: if user navigated away during the yield, abandon this render
+  if (renderGeneration !== gen) return;
+
+  if (codeObserver) { codeObserver.disconnect(); codeObserver = null; }
+  const html = marked.parse(content);
+  preview.innerHTML = html;
+  cachePreviewHtml(id, content, html);
+  lazyHighlightCodeBlocks();
+  lazyLoadAssetImages();
+  setupTodoAttributes();
+}
+
+/** Swap the .active class in the sidebar without rebuilding the DOM. */
+function updateNoteListActiveState(prevId, newId) {
+  if (prevId) {
+    const prev = noteList.querySelector(`.note-item[data-id="${prevId}"]`);
+    if (prev) prev.classList.remove("active");
+  }
+  if (newId) {
+    const next = noteList.querySelector(`.note-item[data-id="${newId}"]`);
+    if (next) next.classList.add("active");
+  }
 }
 
 async function saveCurrentNote() {
   if (!state.currentId) return;
+  invalidatePreviewCache(state.currentId);
   await invoke("save_note", { id: state.currentId, content: editor.value });
   state.dirty = false;
   // Update the metadata for the current note in-place instead of reloading all
   const content = editor.value;
-  const title = (content.split("\n")[0] || state.currentId).replace(/^#+\s*/, "").trim() || state.currentId;
+  const rawTitle =
+    (content.split("\n")[0] || state.currentId).replace(/^#+\s*/, "").trim() ||
+    state.currentId;
+  const title = rawTitle === AUTO_TITLE_PLACEHOLDER ? "New Note" : rawTitle;
   const previewText = content.split("\n").slice(1, 3).join(" ").slice(0, 100);
   const now = Math.floor(Date.now() / 1000);
   const idx = state.notes.findIndex((n) => n.id === state.currentId);
-  const updatedMeta = { id: state.currentId, title, modified: now, preview: previewText };
+  const updatedMeta = {
+    id: state.currentId,
+    title,
+    modified: now,
+    preview: previewText,
+  };
   if (idx >= 0) {
     state.notes.splice(idx, 1);
   }
@@ -635,12 +1168,30 @@ async function saveCurrentNote() {
 async function createNote() {
   const ts = Date.now();
   const id = `note-${ts}`;
-  const content = `# Untitled\n\n`;
+  const mode = getNewNoteTitleMode();
+
+  // Three modes:
+  //   - auto:   "# {{auto_generate}}\n\n", cursor at end → type body, title auto-generated on switch
+  //   - manual: "# ",                       cursor after "# " → type the title, then Enter for body
+  //   - empty:  "",                         cursor at 0 → blank slate, user decides
+  let content;
+  let cursorPos;
+  if (mode === TITLE_MODE_MANUAL) {
+    content = "# ";
+    cursorPos = content.length;
+  } else if (mode === TITLE_MODE_EMPTY) {
+    content = "";
+    cursorPos = 0;
+  } else {
+    content = `# ${AUTO_TITLE_PLACEHOLDER}\n\n`;
+    cursorPos = content.length;
+  }
+
   await invoke("save_note", { id, content });
   await loadNotes();
   await selectNote(id);
   setMode("edit");
-  editor.setSelectionRange(2, 10); // select "Untitled"
+  editor.setSelectionRange(cursorPos, cursorPos);
   editor.focus();
 }
 
@@ -657,7 +1208,9 @@ async function openNewSticky() {
 }
 
 function applyStickyTintById(presetId) {
-  const preset = STICKY_TINT_PRESETS.find((p) => p.id === presetId) || STICKY_TINT_PRESETS[0];
+  const preset =
+    STICKY_TINT_PRESETS.find((p) => p.id === presetId) ||
+    STICKY_TINT_PRESETS[0];
   const app = document.getElementById("app");
   app.style.setProperty("--sticky-glass-1", preset.c1);
   app.style.setProperty("--sticky-glass-2", preset.c2);
@@ -666,11 +1219,12 @@ function applyStickyTintById(presetId) {
 function setupStickyTintPicker() {
   const el = document.getElementById("sticky-tint-picker");
   if (!el || !stickyNoteId) return;
-  const raw = localStorage.getItem(`levinote-sticky-tint-${stickyNoteId}`);
+  const raw = localStorage.getItem(`raynote-sticky-tint-${stickyNoteId}`);
   const current = stickyTintIdFromStorage(raw) || "mist";
   applyStickyTintById(current);
 
-  const currentPreset = STICKY_TINT_PRESETS.find((p) => p.id === current) || STICKY_TINT_PRESETS[0];
+  const currentPreset =
+    STICKY_TINT_PRESETS.find((p) => p.id === current) || STICKY_TINT_PRESETS[0];
   el.innerHTML = `
     <div class="sticky-tint-dd">
       <button type="button" class="sticky-tint-dd-trigger" aria-expanded="false" aria-haspopup="listbox" aria-label="Glass tint">
@@ -687,7 +1241,7 @@ function setupStickyTintPicker() {
               data-tint="${escapeHtml(p.id)}" aria-selected="${p.id === current}">
               ${escapeHtml(p.label)}
             </button>
-          </li>`
+          </li>`,
         ).join("")}
       </ul>
     </div>
@@ -753,7 +1307,7 @@ function setupStickyTintPicker() {
   }
 
   function selectTint(id) {
-    localStorage.setItem(`levinote-sticky-tint-${stickyNoteId}`, id);
+    localStorage.setItem(`raynote-sticky-tint-${stickyNoteId}`, id);
     applyStickyTintById(id);
     const preset = STICKY_TINT_PRESETS.find((p) => p.id === id);
     if (preset) valueEl.textContent = preset.label;
@@ -779,25 +1333,33 @@ function setupStickyTintPicker() {
   });
 }
 
-const deletedNotesStack = [];
+const undoDeleteStack = []; // { id, wasPinned } — most recent deletion at end
+const redoDeleteStack = []; // { id, wasPinned } — most recent redo-able at end
 
 async function deleteCurrentNote() {
   if (!state.currentId) return;
-  const content = await invoke("read_note", { id: state.currentId });
   const wasPinned = isNotePinned(state.currentId);
-  deletedNotesStack.push({ id: state.currentId, content, wasPinned });
-  await invoke("delete_note", { id: state.currentId });
+  const id = state.currentId;
+  invalidatePreviewCache(id);
+
+  await invoke("delete_note", { id });
+
+  undoDeleteStack.push({ id, wasPinned });
+  redoDeleteStack.length = 0; // new action clears redo
+
   // Remove pin state
   if (wasPinned) {
-    state.pinnedNotes.delete(state.currentId);
+    state.pinnedNotes.delete(id);
     savePinnedNotes(state.pinnedNotes);
   }
   // Remove from local list
-  state.notes = state.notes.filter((n) => n.id !== state.currentId);
+  state.notes = state.notes.filter((n) => n.id !== id);
   state.totalNotes = Math.max(0, state.totalNotes - 1);
   state.currentId = null;
   state.dirty = false;
   renderNoteList(state.searchQuery);
+
+  showCopyToast("Moved to Trash");
 
   if (state.notes.length > 0) {
     await selectNote(state.notes[0].id);
@@ -809,9 +1371,14 @@ async function deleteCurrentNote() {
 }
 
 async function undoDeleteNote() {
-  if (deletedNotesStack.length === 0) return;
-  const { id, content, wasPinned } = deletedNotesStack.pop();
-  await invoke("save_note", { id, content });
+  if (undoDeleteStack.length === 0) return;
+  const { id, wasPinned } = undoDeleteStack.pop();
+  const ok = await invoke("restore_note", { id });
+  if (!ok) {
+    showCopyToast("Could not restore note");
+    return;
+  }
+  redoDeleteStack.push({ id, wasPinned });
   // Restore pin state if it was pinned before deletion
   if (wasPinned) {
     state.pinnedNotes.add(id);
@@ -819,6 +1386,63 @@ async function undoDeleteNote() {
   }
   await loadNotes();
   await selectNote(id);
+  showCopyToast("Note restored");
+}
+
+async function redoDeleteNote() {
+  if (redoDeleteStack.length === 0) return;
+  const { id, wasPinned } = redoDeleteStack.pop();
+
+  await invoke("delete_note", { id });
+  undoDeleteStack.push({ id, wasPinned });
+
+  // Remove pin state
+  if (wasPinned) {
+    state.pinnedNotes.delete(id);
+    savePinnedNotes(state.pinnedNotes);
+  }
+  // Remove from local list
+  state.notes = state.notes.filter((n) => n.id !== id);
+  state.totalNotes = Math.max(0, state.totalNotes - 1);
+  if (state.currentId === id) {
+    state.currentId = null;
+    state.dirty = false;
+  }
+  renderNoteList(state.searchQuery);
+
+  showCopyToast("Moved to Trash");
+
+  if (!state.currentId && state.notes.length > 0) {
+    await selectNote(state.notes[0].id);
+  } else if (state.notes.length === 0) {
+    editor.value = "";
+    preview.innerHTML = "";
+    showEmptyState();
+  }
+}
+
+async function restoreFromTrash(id) {
+  const ok = await invoke("restore_note", { id });
+  if (!ok) {
+    showCopyToast("Could not restore note");
+    return;
+  }
+  await loadNotes();
+  await selectNote(id);
+  showCopyToast("Note restored");
+}
+
+async function emptyTrash() {
+  const trashNotes = await invoke("list_trash");
+  if (trashNotes.length === 0) {
+    showCopyToast("Trash is empty");
+    return;
+  }
+  await invoke("empty_trash");
+  // Clear undo/redo stacks since those notes are gone forever
+  undoDeleteStack.length = 0;
+  redoDeleteStack.length = 0;
+  showCopyToast("Trash emptied");
 }
 
 // ─── Copy helpers ───
@@ -850,7 +1474,7 @@ function copyNoteMarkdown() {
 // ─── Render ───
 let codeObserver = null;
 
-function renderPreview(content) {
+function renderPreview(content, noteId = null) {
   if (!content || content.trim() === "") {
     preview.innerHTML = '<div class="empty-state">Start writing...</div>';
     return;
@@ -860,17 +1484,35 @@ function renderPreview(content) {
     codeObserver.disconnect();
     codeObserver = null;
   }
-  preview.innerHTML = marked.parse(content);
-  setupCodeCopyButtons();
+
+  // Check cache when a noteId is provided
+  if (noteId) {
+    const cachedHtml = getCachedPreviewHtml(noteId, content);
+    if (cachedHtml) {
+      preview.innerHTML = cachedHtml;
+      lazyHighlightCodeBlocks();
+      lazyLoadAssetImages();
+      setupTodoAttributes();
+      return;
+    }
+  }
+
+  const html = marked.parse(content);
+  preview.innerHTML = html;
+  if (noteId) {
+    cachePreviewHtml(noteId, content, html);
+  }
+  // Only observers need setup here – click/change/keydown handlers use event
+  // delegation on the preview element (registered once at startup).
   lazyHighlightCodeBlocks();
   lazyLoadAssetImages();
-  setupTodoCheckboxes();
-  setupAssetLinkClicks();
-  setupExternalLinkClicks();
+  setupTodoAttributes();
 }
 
 function lazyHighlightCodeBlocks() {
-  const pending = preview.querySelectorAll('.code-window[data-highlight="pending"]');
+  const pending = preview.querySelectorAll(
+    '.code-window[data-highlight="pending"]',
+  );
   if (pending.length === 0) return;
 
   codeObserver = new IntersectionObserver(
@@ -890,41 +1532,13 @@ function lazyHighlightCodeBlocks() {
         block.dataset.highlight = "done";
       }
     },
-    { root: preview, rootMargin: "200px" }
+    { root: preview, rootMargin: "200px" },
   );
 
   pending.forEach((block) => codeObserver.observe(block));
 }
 
-function setupCodeCopyButtons() {
-  preview.querySelectorAll(".code-copy-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const code = btn.getAttribute("data-code")
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'");
-      copyToClipboard(code);
-      btn.classList.add("copied");
-      btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 8.5l3.5 3.5 7-7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-      setTimeout(() => {
-        btn.classList.remove("copied");
-        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5" stroke="currentColor" stroke-width="1.3"/></svg>`;
-      }, 1500);
-    });
-  });
-
-  // Collapsible code blocks via yellow dot
-  preview.querySelectorAll(".dot-yellow[role='button']").forEach((dot) => {
-    dot.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const codeWindow = dot.closest(".code-window");
-      codeWindow.classList.toggle("collapsed");
-    });
-  });
-}
+// setupCodeCopyButtons – removed: handled by delegated click on preview
 
 // ─── Lazy asset image loading ───
 let imageObserver = null;
@@ -949,7 +1563,7 @@ function lazyLoadAssetImages() {
         loadAssetImage(el, assetName);
       }
     },
-    { root: preview, rootMargin: "200px" }
+    { root: preview, rootMargin: "200px" },
   );
 
   pending.forEach((el) => imageObserver.observe(el));
@@ -961,7 +1575,14 @@ async function loadAssetImage(container, assetName) {
     if (!blobUrl) {
       const base64 = await invoke("read_asset", { name: assetName });
       const ext = assetName.split(".").pop().toLowerCase();
-      const mimeMap = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
+      const mimeMap = {
+        png: "image/png",
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        gif: "image/gif",
+        webp: "image/webp",
+        svg: "image/svg+xml",
+      };
       const mime = mimeMap[ext] || "image/png";
       const binary = atob(base64);
       const bytes = new Uint8Array(binary.length);
@@ -978,43 +1599,18 @@ async function loadAssetImage(container, assetName) {
     container.appendChild(img);
     container.classList.add("loaded");
   } catch {
-    container.querySelector(".lazy-image-placeholder span").textContent = "Failed to load image";
+    container.querySelector(".lazy-image-placeholder span").textContent =
+      "Failed to load image";
     container.classList.add("error");
   }
 }
 
-// ─── Asset link click handler ───
-function setupAssetLinkClicks() {
-  preview.querySelectorAll(".asset-link[data-asset]").forEach((link) => {
-    link.addEventListener("click", async (e) => {
-      e.preventDefault();
-      const assetName = link.dataset.asset;
-      try {
-        await invoke("reveal_asset", { name: assetName });
-      } catch {
-        showCopyToast("Failed to open file");
-      }
-    });
-  });
-}
-
-// ─── External link click handler (open in default browser) ───
-function setupExternalLinkClicks() {
-  preview.querySelectorAll(".external-link[data-url]").forEach((link) => {
-    link.addEventListener("click", async (e) => {
-      e.preventDefault();
-      const url = link.dataset.url;
-      try {
-        await shellOpen(url);
-      } catch {
-        showCopyToast("Failed to open link");
-      }
-    });
-  });
-}
+// setupAssetLinkClicks – removed: handled by delegated click on preview
+// setupExternalLinkClicks – removed: handled by delegated click on preview
 
 // ─── Todo checkboxes ───
-function setupTodoCheckboxes() {
+// Only sets data attributes/classes – actual event handling uses delegation on preview.
+function setupTodoAttributes() {
   const checkboxes = preview.querySelectorAll('input[type="checkbox"]');
   if (checkboxes.length === 0) return;
 
@@ -1027,26 +1623,7 @@ function setupTodoCheckboxes() {
       li.dataset.todoIndex = index;
       li.setAttribute("tabindex", "0");
     }
-
-    cb.addEventListener("change", () => {
-      toggleTodoInMarkdown(index, cb.checked);
-    });
   });
-
-  // Make li click toggle the checkbox too (but not when clicking the checkbox itself)
-  preview.querySelectorAll(".todo-item").forEach((li) => {
-    li.addEventListener("keydown", (e) => {
-      if (e.key === " " || e.key === "Enter") {
-        e.preventDefault();
-        const cb = li.querySelector('input[type="checkbox"]');
-        if (cb) {
-          cb.checked = !cb.checked;
-          cb.dispatchEvent(new Event("change"));
-        }
-      }
-    });
-  });
-
 }
 
 function toggleTodoInMarkdown(index, checked) {
@@ -1062,11 +1639,42 @@ function toggleTodoInMarkdown(index, checked) {
       const after = content.slice(match.index + match[1].length + 2);
       editor.value = before + newMark + after;
       state.dirty = true;
-      saveCurrentNote();
+      // Save without re-rendering – the checkbox already reflects the new state
+      // in the DOM (the user just toggled it). Only persist the markdown.
+      saveTodoChange();
       return;
     }
     count++;
   }
+}
+
+/** Debounced save specifically for todo toggles – avoids full UI cascade. */
+let _todoSaveTimer = null;
+function saveTodoChange() {
+  clearTimeout(_todoSaveTimer);
+  _todoSaveTimer = setTimeout(async () => {
+    if (!state.currentId) return;
+    invalidatePreviewCache(state.currentId);
+    await invoke("save_note", { id: state.currentId, content: editor.value });
+    state.dirty = false;
+    // Update just the metadata in the notes array (title/preview/modified)
+    const content = editor.value;
+    const title =
+      (content.split("\n")[0] || state.currentId)
+        .replace(/^#+\s*/, "")
+        .trim() || state.currentId;
+    const previewText = content.split("\n").slice(1, 3).join(" ").slice(0, 100);
+    const now = Math.floor(Date.now() / 1000);
+    const idx = state.notes.findIndex((n) => n.id === state.currentId);
+    if (idx >= 0) {
+      state.notes[idx] = {
+        ...state.notes[idx],
+        title,
+        modified: now,
+        preview: previewText,
+      };
+    }
+  }, 300);
 }
 
 // ─── Drag & drop file handling (uses Tauri native events) ───
@@ -1101,7 +1709,9 @@ async function handleDroppedPaths(paths) {
 
   for (const filePath of paths) {
     try {
-      const [assetName, originalName] = await invoke("copy_to_assets", { sourcePath: filePath });
+      const [assetName, originalName] = await invoke("copy_to_assets", {
+        sourcePath: filePath,
+      });
 
       let markdown;
       if (IMAGE_EXTS.test(originalName)) {
@@ -1136,10 +1746,13 @@ const PIN_ICON_SVG = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none
 
 function renderNoteItem(n) {
   const isPinned = isNotePinned(n.id);
+  const isAutoTitle = n.title === "New Note" || n.title === AUTO_TITLE_PLACEHOLDER;
+  const titleClass = `note-item-title${isAutoTitle ? " auto-title" : ""}`;
+  const displayTitle = n.title === AUTO_TITLE_PLACEHOLDER ? "New Note" : n.title;
   return `
     <li class="note-item ${n.id === state.currentId ? "active" : ""}${isPinned ? " pinned" : ""}" data-id="${n.id}">
       <div class="note-item-header">
-        <div class="note-item-title">${escapeHtml(n.title)}</div>
+        <div class="${titleClass}">${escapeHtml(displayTitle)}</div>
         <button class="note-pin-btn${isPinned ? " is-pinned" : ""}" data-pin-id="${n.id}" title="${isPinned ? "Unpin" : "Pin"} note" aria-label="${isPinned ? "Unpin" : "Pin"} note">
           ${PIN_ICON_SVG}
         </button>
@@ -1156,7 +1769,7 @@ function renderNoteList(filter = "") {
     ? state.notes.filter(
         (n) =>
           n.title.toLowerCase().includes(filter.toLowerCase()) ||
-          n.preview.toLowerCase().includes(filter.toLowerCase())
+          n.preview.toLowerCase().includes(filter.toLowerCase()),
       )
     : state.notes;
 
@@ -1181,21 +1794,6 @@ function renderNoteList(filter = "") {
 
   noteList.innerHTML = html;
 
-  noteList.querySelectorAll(".note-item").forEach((el) => {
-    el.addEventListener("click", (e) => {
-      // Don't navigate if clicking the pin button
-      if (e.target.closest(".note-pin-btn")) return;
-      selectNote(el.dataset.id);
-    });
-  });
-
-  noteList.querySelectorAll(".note-pin-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleNotePin(btn.dataset.pinId);
-    });
-  });
-
   // Observe sentinel for infinite scroll
   setupScrollObserver();
 }
@@ -1217,7 +1815,7 @@ function setupScrollObserver() {
         loadMoreNotes();
       }
     },
-    { root: noteList, rootMargin: "200px" }
+    { root: noteList, rootMargin: "200px" },
   );
   scrollObserver.observe(sentinel);
 }
@@ -1229,7 +1827,10 @@ async function handleSearch(query) {
   state.searchQuery = query;
   if (!query) {
     // Restore paginated list
-    const result = await invoke("list_notes_paginated", { offset: 0, limit: PAGE_SIZE });
+    const result = await invoke("list_notes_paginated", {
+      offset: 0,
+      limit: PAGE_SIZE,
+    });
     state.notes = result.notes;
     state.totalNotes = result.total;
     state.notesOffset = result.notes.length;
@@ -1257,10 +1858,34 @@ function showEmptyState() {
 
 function updateTitle() {
   const note = state.notes.find((n) => n.id === state.currentId);
-  titlebarTitle.textContent = note ? note.title : "LeviNote";
+  if (!note) {
+    titlebarTitle.textContent = "Raynote";
+    return;
+  }
+  const display =
+    note.title === AUTO_TITLE_PLACEHOLDER ? "New Note" : note.title;
+  titlebarTitle.textContent = display;
 }
 
 // ─── Mode switching ───
+
+/** Switch mode DOM state without triggering renderPreview. Used by selectNote
+ *  which manages rendering separately to avoid double-renders. */
+function setModeRaw(mode) {
+  state.mode = mode;
+  if (mode === "edit") {
+    editor.classList.add("visible");
+    preview.classList.remove("visible");
+    modeIndicator.textContent = "editing";
+    modeIndicator.classList.add("editing");
+  } else {
+    editor.classList.remove("visible");
+    preview.classList.add("visible");
+    modeIndicator.textContent = "preview";
+    modeIndicator.classList.remove("editing");
+  }
+}
+
 function setMode(mode) {
   state.mode = mode;
   if (mode === "edit") {
@@ -1271,7 +1896,7 @@ function setMode(mode) {
   } else {
     editor.classList.remove("visible");
     preview.classList.add("visible");
-    renderPreview(editor.value);
+    renderPreview(editor.value, state.currentId);
     modeIndicator.textContent = "preview";
     modeIndicator.classList.remove("editing");
   }
@@ -1279,7 +1904,10 @@ function setMode(mode) {
 
 // ─── Command Palette ───
 function getCommands() {
-  const pinLabelSticky = state.currentId && isNotePinned(state.currentId) ? "Unpin Note" : "Pin Note";
+  const pinLabelSticky =
+    state.currentId && isNotePinned(state.currentId)
+      ? "Unpin Note"
+      : "Pin Note";
 
   if (isSticky) {
     return [
@@ -1291,10 +1919,31 @@ function getCommands() {
       {
         label: pinLabelSticky,
         hint: formatShortcut(state.shortcuts.pinNote),
-        action: () => { if (state.currentId) toggleNotePin(state.currentId); },
+        action: () => {
+          if (state.currentId) toggleNotePin(state.currentId);
+        },
       },
-      { label: "Delete Note", hint: formatShortcut(state.shortcuts.deleteNote), action: deleteCurrentNote },
-      { label: "Undo Delete Note", hint: formatShortcut(state.shortcuts.undoDelete), action: undoDeleteNote },
+      {
+        label: "Delete Note",
+        hint: formatShortcut(state.shortcuts.deleteNote),
+        action: deleteCurrentNote,
+      },
+      {
+        label: "Undo Delete Note",
+        hint: formatShortcut(state.shortcuts.undoDelete),
+        action: undoDeleteNote,
+      },
+      {
+        label: "Redo Delete Note",
+        hint: formatShortcut(state.shortcuts.redoDelete),
+        action: redoDeleteNote,
+      },
+      {
+        label: "View Trash",
+        hint: formatShortcut(state.shortcuts.viewTrash),
+        action: () => openPalette("trash"),
+      },
+      { label: "Empty Trash", action: emptyTrash },
       {
         label: "Toggle Edit/Preview",
         hint: formatShortcut(state.shortcuts.toggleEdit),
@@ -1318,10 +1967,17 @@ function getCommands() {
     ];
   }
 
-  const pinLabel = state.currentId && isNotePinned(state.currentId) ? "Unpin Note" : "Pin Note";
+  const pinLabel =
+    state.currentId && isNotePinned(state.currentId)
+      ? "Unpin Note"
+      : "Pin Note";
 
   return [
-    { label: "New Note", hint: formatShortcut(state.shortcuts.newNote), action: createNote },
+    {
+      label: "New Note",
+      hint: formatShortcut(state.shortcuts.newNote),
+      action: createNote,
+    },
     {
       label: "Open Sticky (this note)",
       hint: formatShortcut(state.shortcuts.newSticky),
@@ -1330,10 +1986,31 @@ function getCommands() {
     {
       label: pinLabel,
       hint: formatShortcut(state.shortcuts.pinNote),
-      action: () => { if (state.currentId) toggleNotePin(state.currentId); },
+      action: () => {
+        if (state.currentId) toggleNotePin(state.currentId);
+      },
     },
-    { label: "Delete Note", hint: formatShortcut(state.shortcuts.deleteNote), action: deleteCurrentNote },
-    { label: "Undo Delete Note", hint: formatShortcut(state.shortcuts.undoDelete), action: undoDeleteNote },
+    {
+      label: "Delete Note",
+      hint: formatShortcut(state.shortcuts.deleteNote),
+      action: deleteCurrentNote,
+    },
+    {
+      label: "Undo Delete Note",
+      hint: formatShortcut(state.shortcuts.undoDelete),
+      action: undoDeleteNote,
+    },
+    {
+      label: "Redo Delete Note",
+      hint: formatShortcut(state.shortcuts.redoDelete),
+      action: redoDeleteNote,
+    },
+    {
+      label: "View Trash",
+      hint: formatShortcut(state.shortcuts.viewTrash),
+      action: () => openPalette("trash"),
+    },
+    { label: "Empty Trash", action: emptyTrash },
     {
       label: "Toggle Edit/Preview",
       hint: formatShortcut(state.shortcuts.toggleEdit),
@@ -1372,6 +2049,8 @@ function openPalette(mode = "notes") {
   state.selectedPaletteIndex = 0;
   palette.classList.remove("hidden");
   paletteInput.value = "";
+  paletteInput.placeholder =
+    mode === "trash" ? "Search trash..." : "Type a command or search notes...";
   paletteInput.focus();
   renderPalette();
 }
@@ -1386,6 +2065,43 @@ let paletteSearchTimeout = null;
 
 function renderPalette() {
   const query = paletteInput.value.toLowerCase();
+
+  if (state.paletteMode === "trash") {
+    paletteInput.placeholder = "Search trash...";
+    clearTimeout(paletteSearchTimeout);
+    paletteSearchTimeout = setTimeout(async () => {
+      const trashNotes = await invoke("list_trash");
+      const filtered = query
+        ? trashNotes.filter(
+            (n) =>
+              n.title.toLowerCase().includes(query) ||
+              n.preview.toLowerCase().includes(query),
+          )
+        : trashNotes;
+      if (filtered.length === 0) {
+        renderPaletteItems([
+          { label: "Trash is empty", hint: "", action: () => closePalette() },
+        ]);
+        return;
+      }
+      const items = filtered.map((n) => ({
+        label: n.title,
+        hint: formatDate(n.modified),
+        action: () => restoreFromTrash(n.id),
+      }));
+      // Add "Empty Trash" action at the bottom
+      items.push({
+        label: "Empty Trash",
+        hint: `${filtered.length} notes`,
+        action: async () => {
+          await emptyTrash();
+          openPalette("trash");
+        },
+      });
+      renderPaletteItems(items);
+    }, 100);
+    return;
+  }
 
   if (state.paletteMode === "commands" || query.startsWith(">")) {
     const q = query.replace(/^>\s*/, "");
@@ -1404,11 +2120,20 @@ function renderPalette() {
       // Show pinned first, then recent notes
       const pinnedItems = state.notes
         .filter((n) => isNotePinned(n.id))
-        .map((n) => ({ label: n.title, hint: "pinned", action: () => selectNote(n.id), pinned: true }));
+        .map((n) => ({
+          label: n.title,
+          hint: "pinned",
+          action: () => selectNote(n.id),
+          pinned: true,
+        }));
       const unpinnedItems = state.notes
         .filter((n) => !isNotePinned(n.id))
         .slice(0, 50 - pinnedItems.length)
-        .map((n) => ({ label: n.title, hint: formatDate(n.modified), action: () => selectNote(n.id) }));
+        .map((n) => ({
+          label: n.title,
+          hint: formatDate(n.modified),
+          action: () => selectNote(n.id),
+        }));
       renderPaletteItems([...pinnedItems, ...unpinnedItems]);
     } else {
       paletteSearchTimeout = setTimeout(async () => {
@@ -1441,7 +2166,7 @@ function renderPaletteItems(items) {
       <span class="palette-item-label">${item.pinned ? `<span class="palette-pin-icon">${PIN_ICON_SVG}</span>` : ""}${escapeHtml(item.label)}</span>
       <span class="palette-item-hint">${escapeHtml(item.hint)}</span>
     </li>
-  `
+  `,
     )
     .join("");
 
@@ -1475,9 +2200,7 @@ function toggleSidebar() {
 async function togglePin() {
   state.pinned = !state.pinned;
   await getCurrentWindow().setAlwaysOnTop(state.pinned);
-  document
-    .getElementById("btn-pin")
-    .classList.toggle("active", state.pinned);
+  document.getElementById("btn-pin").classList.toggle("active", state.pinned);
 }
 
 // ─── Event listeners ───
@@ -1505,15 +2228,12 @@ function setupEventListeners() {
       e.preventDefault();
       state.selectedPaletteIndex = Math.min(
         state.selectedPaletteIndex + 1,
-        items.length - 1
+        items.length - 1,
       );
       renderPalette();
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      state.selectedPaletteIndex = Math.max(
-        state.selectedPaletteIndex - 1,
-        0
-      );
+      state.selectedPaletteIndex = Math.max(state.selectedPaletteIndex - 1, 0);
       renderPalette();
     } else if (e.key === "Enter") {
       e.preventDefault();
@@ -1524,25 +2244,41 @@ function setupEventListeners() {
   });
 
   // Palette backdrop click
-  document.querySelector(".palette-backdrop")?.addEventListener("click", closePalette);
+  document
+    .querySelector(".palette-backdrop")
+    ?.addEventListener("click", closePalette);
 
   // Titlebar buttons
-  document.getElementById("btn-sidebar").addEventListener("click", toggleSidebar);
-  document.getElementById("btn-settings").addEventListener("click", openSettings);
+  document
+    .getElementById("btn-sidebar")
+    .addEventListener("click", toggleSidebar);
+  document
+    .getElementById("btn-settings")
+    .addEventListener("click", openSettings);
   document.getElementById("btn-pin").addEventListener("click", togglePin);
   document.getElementById("btn-new").addEventListener("click", createNote);
-  document.getElementById("btn-close").addEventListener("click", () => closeCurrentWindow());
-  document.getElementById("btn-minimize").addEventListener("click", () => getCurrentWindow().minimize());
+  document
+    .getElementById("btn-close")
+    .addEventListener("click", () => closeCurrentWindow());
+  document
+    .getElementById("btn-minimize")
+    .addEventListener("click", () => getCurrentWindow().minimize());
 
   // Sticky: CSS -webkit-app-region / data-tauri-drag-region fail to hit the gap between tint and
   // window controls on transparent WKWebView; use the window API instead.
   if (isSticky) {
     const tb = document.getElementById("titlebar");
     tb.removeAttribute("data-tauri-drag-region");
-    document.querySelector(".titlebar-drag-spacer")?.removeAttribute("data-tauri-drag-region");
+    document
+      .querySelector(".titlebar-drag-spacer")
+      ?.removeAttribute("data-tauri-drag-region");
     tb.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
-      if (e.target.closest(".titlebar-btn") || e.target.closest(".sticky-tint-dd")) return;
+      if (
+        e.target.closest(".titlebar-btn") ||
+        e.target.closest(".sticky-tint-dd")
+      )
+        return;
       void getCurrentWindow().startDragging();
     });
   }
@@ -1557,34 +2293,44 @@ function setupEventListeners() {
   });
 
   // Block refresh, devtools, and other browser-revealing shortcuts
-  document.addEventListener("keydown", (e) => {
-    const meta = e.metaKey || e.ctrlKey;
-    // F5 / Cmd+R / Ctrl+R — refresh
-    if (e.key === "F5" || (meta && e.key === "r")) {
-      e.preventDefault();
-      return;
-    }
-    // Cmd+Shift+R / Ctrl+Shift+R — hard refresh
-    if (meta && e.shiftKey && e.key === "R") {
-      e.preventDefault();
-      return;
-    }
-    // Cmd+Option+I / Ctrl+Shift+I — devtools
-    if ((e.metaKey && e.altKey && e.key === "i") || (e.ctrlKey && e.shiftKey && e.key === "I")) {
-      e.preventDefault();
-      return;
-    }
-    // Cmd+Option+J — devtools console
-    if (e.metaKey && e.altKey && e.key === "j") {
-      e.preventDefault();
-      return;
-    }
-    // Cmd+Option+U / Ctrl+U — view source
-    if ((e.metaKey && e.altKey && e.key === "u") || (e.ctrlKey && e.key === "u")) {
-      e.preventDefault();
-      return;
-    }
-  }, true); // capture phase to intercept before anything else
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      const meta = e.metaKey || e.ctrlKey;
+      // F5 / Cmd+R / Ctrl+R — refresh
+      if (e.key === "F5" || (meta && e.key === "r")) {
+        e.preventDefault();
+        return;
+      }
+      // Cmd+Shift+R / Ctrl+Shift+R — hard refresh
+      if (meta && e.shiftKey && e.key === "R") {
+        e.preventDefault();
+        return;
+      }
+      // Cmd+Option+I / Ctrl+Shift+I — devtools
+      if (
+        (e.metaKey && e.altKey && e.key === "i") ||
+        (e.ctrlKey && e.shiftKey && e.key === "I")
+      ) {
+        e.preventDefault();
+        return;
+      }
+      // Cmd+Option+J — devtools console
+      if (e.metaKey && e.altKey && e.key === "j") {
+        e.preventDefault();
+        return;
+      }
+      // Cmd+Option+U / Ctrl+U — view source
+      if (
+        (e.metaKey && e.altKey && e.key === "u") ||
+        (e.ctrlKey && e.key === "u")
+      ) {
+        e.preventDefault();
+        return;
+      }
+    },
+    true,
+  ); // capture phase to intercept before anything else
 
   // Global keyboard shortcuts
   document.addEventListener("keydown", (e) => {
@@ -1660,9 +2406,21 @@ function setupEventListeners() {
       return;
     }
 
+    if (matchesShortcut(e, sc.redoDelete)) {
+      e.preventDefault();
+      redoDeleteNote();
+      return;
+    }
+
     if (matchesShortcut(e, sc.undoDelete)) {
       e.preventDefault();
       undoDeleteNote();
+      return;
+    }
+
+    if (matchesShortcut(e, sc.viewTrash)) {
+      e.preventDefault();
+      openPalette("trash");
       return;
     }
 
@@ -1676,7 +2434,9 @@ function setupEventListeners() {
       e.preventDefault();
       if (state.currentId) {
         toggleNotePin(state.currentId);
-        showCopyToast(isNotePinned(state.currentId) ? "Note pinned" : "Note unpinned");
+        showCopyToast(
+          isNotePinned(state.currentId) ? "Note pinned" : "Note unpinned",
+        );
       }
       return;
     }
@@ -1781,7 +2541,11 @@ function setupEventListeners() {
     }
 
     // Option+Arrow: duplicate line up/down
-    if (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp") && e.shiftKey) {
+    if (
+      e.altKey &&
+      (e.key === "ArrowDown" || e.key === "ArrowUp") &&
+      e.shiftKey
+    ) {
       e.preventDefault();
       const val = editor.value;
       const cursor = editor.selectionStart;
@@ -1796,7 +2560,8 @@ function setupEventListeners() {
         editor.selectionStart = cursor + line.length + 1;
         editor.selectionEnd = selEnd + line.length + 1;
       } else {
-        editor.value = val.slice(0, lineStart) + line + "\n" + val.slice(lineStart);
+        editor.value =
+          val.slice(0, lineStart) + line + "\n" + val.slice(lineStart);
         editor.selectionStart = cursor;
         editor.selectionEnd = selEnd;
       }
@@ -1807,15 +2572,26 @@ function setupEventListeners() {
 
 function navigateNotes(direction) {
   if (state.notes.length === 0) return;
-  const currentIndex = state.notes.findIndex(
-    (n) => n.id === state.currentId
-  );
+  // Build the visual order: pinned first, then unpinned (matches renderNoteList)
+  const displayNotes = state.searchQuery
+    ? state.notes.filter(
+        (n) =>
+          n.title.toLowerCase().includes(state.searchQuery.toLowerCase()) ||
+          n.preview.toLowerCase().includes(state.searchQuery.toLowerCase()),
+      )
+    : state.notes;
+  const pinned = displayNotes.filter((n) => isNotePinned(n.id));
+  const unpinned = displayNotes.filter((n) => !isNotePinned(n.id));
+  const visualOrder = [...pinned, ...unpinned];
+
+  if (visualOrder.length === 0) return;
+  const currentIndex = visualOrder.findIndex((n) => n.id === state.currentId);
   const newIndex = Math.max(
     0,
-    Math.min(state.notes.length - 1, currentIndex + direction)
+    Math.min(visualOrder.length - 1, currentIndex + direction),
   );
   if (newIndex !== currentIndex) {
-    selectNote(state.notes[newIndex].id);
+    selectNote(visualOrder[newIndex].id);
   }
 }
 
@@ -1846,4 +2622,7 @@ function formatDate(timestamp) {
 }
 
 // ─── Boot ───
-init();
+init().catch((err) => {
+  console.error("init() failed:", err);
+  hideSplash();
+});

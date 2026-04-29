@@ -1,11 +1,12 @@
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::{WebviewWindow, WebviewWindowBuilder},
-    Emitter, Manager, WebviewUrl,
+    Emitter, Manager, State, WebviewUrl,
 };
 
 fn notes_dir() -> PathBuf {
@@ -14,9 +15,17 @@ fn notes_dir() -> PathBuf {
         .join("Library")
         .join("Mobile Documents")
         .join("com~apple~CloudDocs")
-        .join("LeviNote");
+        .join("Raynote");
     if !dir.exists() {
         fs::create_dir_all(&dir).expect("Could not create notes directory in iCloud");
+    }
+    dir
+}
+
+fn trash_dir() -> PathBuf {
+    let dir = notes_dir().join(".trash");
+    if !dir.exists() {
+        fs::create_dir_all(&dir).expect("Could not create trash directory");
     }
     dir
 }
@@ -35,9 +44,178 @@ struct PaginatedNotes {
     total: usize,
 }
 
-/// Read all note metadata from disk, sorted by modified desc.
+struct AppState {
+    notes_cache: RwLock<Vec<NoteMeta>>,
+}
+
+fn parse_note_meta(id: String, content: &str, modified: u64) -> NoteMeta {
+    let title = content
+        .lines()
+        .next()
+        .unwrap_or(&id)
+        .trim_start_matches('#')
+        .trim()
+        .to_string();
+    let title = if title.is_empty() {
+        id.clone()
+    } else if title == "{{auto_generate}}" {
+        "New Note".to_string()
+    } else {
+        title
+    };
+    let preview = content
+        .lines()
+        .skip(1)
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(100)
+        .collect();
+    NoteMeta {
+        id,
+        title,
+        modified,
+        preview,
+    }
+}
+
+fn note_meta_from_md_path(path: &Path) -> Option<NoteMeta> {
+    if !path.extension().map_or(false, |e| e == "md") {
+        return None;
+    }
+    let id = path.file_stem()?.to_string_lossy().to_string();
+    let content = fs::read_to_string(path).ok()?;
+    let modified = fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(parse_note_meta(id, &content, modified))
+}
+
+/// Read all note metadata from disk, sorted by modified desc (startup / full rescan only).
 fn read_all_notes() -> Vec<NoteMeta> {
     let dir = notes_dir();
+    let mut notes: Vec<NoteMeta> = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Some(meta) = note_meta_from_md_path(&entry.path()) {
+                notes.push(meta);
+            }
+        }
+    }
+
+    notes.sort_by(|a, b| b.modified.cmp(&a.modified));
+    notes
+}
+
+#[tauri::command]
+fn list_notes(state: State<'_, AppState>) -> Vec<NoteMeta> {
+    state.notes_cache.read().unwrap().clone()
+}
+
+#[tauri::command]
+fn list_notes_paginated(state: State<'_, AppState>, offset: usize, limit: usize) -> PaginatedNotes {
+    let cache = state.notes_cache.read().unwrap();
+    let total = cache.len();
+    let notes = cache
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .cloned()
+        .collect();
+    PaginatedNotes { notes, total }
+}
+
+#[tauri::command]
+fn search_notes(state: State<'_, AppState>, query: String, limit: usize) -> Vec<NoteMeta> {
+    let q = query.to_lowercase();
+    let cache = state.notes_cache.read().unwrap();
+    cache
+        .iter()
+        .filter(|n| {
+            n.title.to_lowercase().contains(&q) || n.preview.to_lowercase().contains(&q)
+        })
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+#[tauri::command]
+fn read_note(id: String) -> String {
+    let path = notes_dir().join(format!("{}.md", id));
+    fs::read_to_string(path).unwrap_or_default()
+}
+
+#[tauri::command]
+fn save_note(state: State<'_, AppState>, id: String, content: String) -> bool {
+    let path = notes_dir().join(format!("{}.md", &id));
+    if fs::write(&path, &content).is_ok() {
+        let modified = fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let meta = parse_note_meta(id.clone(), &content, modified);
+        let mut cache = state.notes_cache.write().unwrap();
+        if let Some(idx) = cache.iter().position(|n| n.id == id) {
+            cache[idx] = meta;
+        } else {
+            cache.push(meta);
+        }
+        cache.sort_by(|a, b| b.modified.cmp(&a.modified));
+        true
+    } else {
+        false
+    }
+}
+
+#[tauri::command]
+fn delete_note(state: State<'_, AppState>, id: String) -> bool {
+    let path = notes_dir().join(format!("{}.md", id));
+    if path.exists() {
+        let trash_path = trash_dir().join(format!("{}.md", id));
+        if fs::rename(&path, &trash_path).is_ok() {
+            let mut cache = state.notes_cache.write().unwrap();
+            cache.retain(|n| n.id != id);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+#[tauri::command]
+fn restore_note(state: State<'_, AppState>, id: String) -> bool {
+    let trash_path = trash_dir().join(format!("{}.md", id));
+    let notes_path = notes_dir().join(format!("{}.md", id));
+    if trash_path.exists() && !notes_path.exists() {
+        if fs::rename(&trash_path, &notes_path).is_ok() {
+            if let Some(meta) = note_meta_from_md_path(&notes_path) {
+                let mut cache = state.notes_cache.write().unwrap();
+                if !cache.iter().any(|n| n.id == id) {
+                    cache.push(meta);
+                    cache.sort_by(|a, b| b.modified.cmp(&a.modified));
+                }
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+#[tauri::command]
+fn list_trash() -> Vec<NoteMeta> {
+    let dir = trash_dir();
     let mut notes: Vec<NoteMeta> = Vec::new();
 
     if let Ok(entries) = fs::read_dir(&dir) {
@@ -94,46 +272,24 @@ fn read_all_notes() -> Vec<NoteMeta> {
 }
 
 #[tauri::command]
-fn list_notes() -> Vec<NoteMeta> {
-    read_all_notes()
+fn empty_trash() -> bool {
+    let dir = trash_dir();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let _ = fs::remove_file(path);
+            }
+        }
+        true
+    } else {
+        false
+    }
 }
 
 #[tauri::command]
-fn list_notes_paginated(offset: usize, limit: usize) -> PaginatedNotes {
-    let all = read_all_notes();
-    let total = all.len();
-    let notes = all.into_iter().skip(offset).take(limit).collect();
-    PaginatedNotes { notes, total }
-}
-
-#[tauri::command]
-fn search_notes(query: String, limit: usize) -> Vec<NoteMeta> {
-    let q = query.to_lowercase();
-    let all = read_all_notes();
-    all.into_iter()
-        .filter(|n| {
-            n.title.to_lowercase().contains(&q)
-                || n.preview.to_lowercase().contains(&q)
-        })
-        .take(limit)
-        .collect()
-}
-
-#[tauri::command]
-fn read_note(id: String) -> String {
-    let path = notes_dir().join(format!("{}.md", id));
-    fs::read_to_string(path).unwrap_or_default()
-}
-
-#[tauri::command]
-fn save_note(id: String, content: String) -> bool {
-    let path = notes_dir().join(format!("{}.md", id));
-    fs::write(path, content).is_ok()
-}
-
-#[tauri::command]
-fn delete_note(id: String) -> bool {
-    let path = notes_dir().join(format!("{}.md", id));
+fn permanently_delete_note(id: String) -> bool {
+    let path = trash_dir().join(format!("{}.md", id));
     if path.exists() {
         fs::remove_file(path).is_ok()
     } else {
@@ -222,11 +378,19 @@ fn copy_to_assets(source_path: String) -> Result<(String, String), String> {
 }
 
 #[tauri::command]
-fn rename_note(old_id: String, new_id: String) -> bool {
-    let old_path = notes_dir().join(format!("{}.md", old_id));
-    let new_path = notes_dir().join(format!("{}.md", new_id));
+fn rename_note(state: State<'_, AppState>, old_id: String, new_id: String) -> bool {
+    let old_path = notes_dir().join(format!("{}.md", &old_id));
+    let new_path = notes_dir().join(format!("{}.md", &new_id));
     if old_path.exists() && !new_path.exists() {
-        fs::rename(old_path, new_path).is_ok()
+        if fs::rename(&old_path, &new_path).is_ok() {
+            let mut cache = state.notes_cache.write().unwrap();
+            if let Some(idx) = cache.iter().position(|n| n.id == old_id) {
+                cache[idx].id = new_id;
+            }
+            true
+        } else {
+            false
+        }
     } else {
         false
     }
@@ -334,6 +498,11 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            let initial_notes = read_all_notes();
+            app.manage(AppState {
+                notes_cache: RwLock::new(initial_notes),
+            });
+
             // Register global shortcut: Ctrl+Cmd+Option+Shift+N
             use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
             let shortcut = Shortcut::new(
@@ -357,7 +526,7 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .icon_as_template(true)
-                .tooltip("LeviNote")
+                .tooltip("Raynote")
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -383,6 +552,10 @@ pub fn run() {
             read_note,
             save_note,
             delete_note,
+            restore_note,
+            list_trash,
+            empty_trash,
+            permanently_delete_note,
             rename_note,
             set_dock_visible,
             save_asset,
@@ -392,5 +565,5 @@ pub fn run() {
             create_sticky_window,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running LeviNote");
+        .expect("error while running Raynote");
 }

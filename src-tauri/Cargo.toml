@@ -1,12 +1,12 @@
 [package]
-name = "levinote"
+name = "raynote"
 version = "0.1.0"
 description = "A minimal markdown note-taking app"
 authors = ["Levi"]
 edition = "2021"
 
 [lib]
-name = "levinote_lib"
+name = "raynote_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for LeviNote",
+  "description": "Default capabilities for Raynote",
   "windows": ["main", "sticky-*"],
   "permissions": [
     "core:default",

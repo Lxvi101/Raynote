@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nickel-org/json-schema/refs/heads/main/tauri/tauri.conf.schema.json",
-  "productName": "LeviNote",
+  "productName": "Raynote",
   "version": "0.1.0",
-  "identifier": "com.levinote.notes",
+  "identifier": "com.raynote.notes",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "LeviNote",
+        "title": "Raynote",
         "width": 860,
         "height": 640,
         "minWidth": 480,
@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self'; img-src 'self' blob:"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self'; img-src 'self' blob:; connect-src 'self' https:"
     }
   },
   "bundle": {
