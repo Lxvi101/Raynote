@@ -579,6 +579,24 @@ html, body {
   color: #c4b5fd;
 }
 
+#preview code.inline-code {
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition),
+    box-shadow var(--transition);
+}
+
+#preview code.inline-code:hover {
+  background: rgba(124, 111, 247, 0.22);
+  color: #e0d6ff;
+  box-shadow: 0 0 0 1px rgba(124, 111, 247, 0.35);
+}
+
+#preview code.inline-code.copied {
+  background: rgba(40, 200, 64, 0.22);
+  color: #b6f0c0;
+  box-shadow: 0 0 0 1px rgba(40, 200, 64, 0.45);
+}
+
 /* ─── macOS Code Window ─── */
 .code-window {
   margin: 20px 0;

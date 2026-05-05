@@ -507,6 +507,9 @@ const codeRenderer = {
       </div>
     </div>`;
   },
+  codespan(token) {
+    return `<code class="inline-code" title="Click to copy">${escapeHtml(token.text)}</code>`;
+  },
 };
 
 // ─── Configure marked ───
@@ -783,6 +786,19 @@ preview.addEventListener("click", (e) => {
     shellOpen(extLink.dataset.url).catch(() => {
       showCopyToast("Failed to open link");
     });
+    return;
+  }
+
+  // Inline code: click to copy
+  const inlineCode = e.target.closest(".inline-code");
+  if (inlineCode) {
+    e.stopPropagation();
+    copyToClipboard(inlineCode.textContent);
+    inlineCode.classList.remove("copied");
+    void inlineCode.offsetWidth;
+    inlineCode.classList.add("copied");
+    setTimeout(() => inlineCode.classList.remove("copied"), 600);
+    showCopyToast("Copied!");
     return;
   }
 });
@@ -2935,6 +2951,57 @@ function setupEventListeners() {
         editor.selectionEnd = selEnd;
       }
       state.dirty = true;
+    }
+
+    // Option+Arrow (no shift/cmd/ctrl): move line(s) up/down — VSCode-style
+    if (
+      e.altKey &&
+      !e.shiftKey &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      (e.key === "ArrowDown" || e.key === "ArrowUp")
+    ) {
+      e.preventDefault();
+      const val = editor.value;
+      const cursor = editor.selectionStart;
+      const selEnd = editor.selectionEnd;
+      const blockStart = val.lastIndexOf("\n", cursor - 1) + 1;
+      const lineEndIdx = val.indexOf("\n", selEnd);
+      const blockEnd = lineEndIdx === -1 ? val.length : lineEndIdx;
+
+      if (e.key === "ArrowUp") {
+        if (blockStart === 0) return;
+        const prevLineStart = val.lastIndexOf("\n", blockStart - 2) + 1;
+        const block = val.slice(blockStart, blockEnd);
+        const prevLine = val.slice(prevLineStart, blockStart - 1);
+        editor.value =
+          val.slice(0, prevLineStart) +
+          block +
+          "\n" +
+          prevLine +
+          val.slice(blockEnd);
+        const offset = -(prevLine.length + 1);
+        editor.selectionStart = cursor + offset;
+        editor.selectionEnd = selEnd + offset;
+      } else {
+        if (blockEnd >= val.length) return;
+        const nextLineEndIdx = val.indexOf("\n", blockEnd + 1);
+        const nextLineEnd =
+          nextLineEndIdx === -1 ? val.length : nextLineEndIdx;
+        const block = val.slice(blockStart, blockEnd);
+        const nextLine = val.slice(blockEnd + 1, nextLineEnd);
+        editor.value =
+          val.slice(0, blockStart) +
+          nextLine +
+          "\n" +
+          block +
+          val.slice(nextLineEnd);
+        const offset = nextLine.length + 1;
+        editor.selectionStart = cursor + offset;
+        editor.selectionEnd = selEnd + offset;
+      }
+      state.dirty = true;
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
     }
   });
 }
