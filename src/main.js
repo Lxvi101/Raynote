@@ -7,6 +7,8 @@ import hljs from "highlight.js";
 import "highlight.js/styles/github-dark-dimmed.min.css";
 import katex from "katex";
 import "katex/dist/katex.min.css";
+import { editor, TextareaBackend } from "./editor-adapter.js";
+import { loadAssetImage } from "./asset-cache.js";
 import "./style.css";
 
 // ─── Auto-title generation ───
@@ -247,9 +249,9 @@ async function autoGenerateTitle(noteId, content) {
 
     // If user is currently viewing this note, update the editor too
     if (state.currentId === noteId) {
-      const pos = editor.selectionStart;
-      editor.value = updatedContent;
-      editor.selectionStart = editor.selectionEnd = pos;
+      const pos = editor.getSelection().start;
+      editor.setText(updatedContent);
+      editor.setSelection(pos, pos);
       invalidatePreviewCache(noteId);
     }
 
@@ -538,6 +540,7 @@ const defaultShortcuts = {
     shift: true,
   },
   toggleEdit: { label: "Toggle Edit/Preview", key: "e", meta: true },
+  toggleLive: { label: "Toggle Live Preview", key: "l", meta: true, shift: true },
   toggleSidebar: { label: "Toggle Sidebar", key: "s", meta: true, shift: true },
   save: { label: "Save Note", key: "s", meta: true },
   closeWindow: { label: "Close Window", key: "w", meta: true },
@@ -668,7 +671,7 @@ const state = {
   searchQuery: "",
   pinnedNotes: loadPinnedNotes(),
   currentId: null,
-  mode: "preview", // 'preview' | 'edit'
+  mode: "preview", // 'preview' | 'edit' | 'live'
   sidebarOpen: true,
   pinned: false,
   dirty: false,
@@ -711,7 +714,7 @@ function invalidatePreviewCache(noteId) {
 
 // ─── DOM refs ───
 const $ = (s) => document.querySelector(s);
-const editor = $("#editor");
+const editorEl = $("#editor");
 const preview = $("#preview");
 const noteList = $("#note-list");
 const search = $("#search");
@@ -720,6 +723,27 @@ const paletteInput = $("#palette-input");
 const paletteResults = $("#palette-results");
 const sidebar = $("#sidebar");
 const titlebarTitle = $("#titlebar-title");
+
+// ─── Editor adapter setup ───
+// `editor` (imported) is the abstraction; backends are registered for each
+// supported mode. The textarea backend is the only one available at boot —
+// the live-preview (CM6) backend is lazy-imported on first switch into
+// live mode.
+editor.register("textarea", new TextareaBackend(editorEl));
+editor.setActive("textarea");
+
+// Remember the last editor surface the user picked so re-launching the app
+// doesn't force everyone back to raw textarea every time.
+const STORAGE_PREFERRED_EDITOR = "raynote-preferred-editor";
+function getPreferredEditor() {
+  const v = localStorage.getItem(STORAGE_PREFERRED_EDITOR);
+  return v === "live" ? "live" : "textarea";
+}
+function setPreferredEditor(name) {
+  if (name === "textarea" || name === "live") {
+    localStorage.setItem(STORAGE_PREFERRED_EDITOR, name);
+  }
+}
 
 // ─── Event delegation (single listener instead of per-element) ───
 
@@ -1373,14 +1397,15 @@ async function init() {
       preview.innerHTML =
         '<div class="empty-state">This sticky could not be found.</div>';
       preview.classList.add("visible");
-      editor.classList.remove("visible");
+      editorEl.classList.remove("visible");
       setupEventListeners();
       setupTauriListeners();
       return;
     }
     await selectNote(stickyNoteId);
     setupStickyTintPicker();
-    setMode("edit");
+    const target = getPreferredEditor() === "live" ? "live" : "edit";
+    await setMode(target);
     editor.focus();
   } else if (state.notes.length > 0) {
     await selectNote(state.notes[0].id);
@@ -1450,7 +1475,7 @@ async function selectNote(id) {
 
   // If the note we're leaving still has the auto-title placeholder, generate a title in the background
   if (state.currentId) {
-    const prevContent = editor.value;
+    const prevContent = editor.getText();
     const prevNoteId = state.currentId;
     if (hasAutoTitlePlaceholder(prevContent)) {
       autoGenerateTitle(prevNoteId, prevContent); // fire-and-forget
@@ -1460,7 +1485,7 @@ async function selectNote(id) {
   const prevId = state.currentId;
   state.currentId = id;
   const content = await invoke("read_note", { id });
-  editor.value = content;
+  editor.setText(content);
 
   // Update sidebar immediately (before any heavy render work)
   updateNoteListActiveState(prevId, id);
@@ -1524,10 +1549,9 @@ function updateNoteListActiveState(prevId, newId) {
 async function saveCurrentNote() {
   if (!state.currentId) return;
   invalidatePreviewCache(state.currentId);
-  await invoke("save_note", { id: state.currentId, content: editor.value });
+  const content = editor.getText();
+  await invoke("save_note", { id: state.currentId, content });
   state.dirty = false;
-  // Update the metadata for the current note in-place instead of reloading all
-  const content = editor.value;
   const rawTitle =
     (content.split("\n")[0] || state.currentId).replace(/^#+\s*/, "").trim() ||
     state.currentId;
@@ -1574,8 +1598,9 @@ async function createNote() {
   await invoke("save_note", { id, content });
   await loadNotes();
   await selectNote(id);
-  setMode("edit");
-  editor.setSelectionRange(cursorPos, cursorPos);
+  const target = getPreferredEditor() === "live" ? "live" : "edit";
+  await setMode(target);
+  editor.setSelection(cursorPos, cursorPos);
   editor.focus();
 }
 
@@ -1748,7 +1773,7 @@ async function deleteCurrentNote() {
   if (state.notes.length > 0) {
     await selectNote(state.notes[0].id);
   } else {
-    editor.value = "";
+    editor.setText("");
     preview.innerHTML = "";
     showEmptyState();
   }
@@ -1799,7 +1824,7 @@ async function redoDeleteNote() {
   if (!state.currentId && state.notes.length > 0) {
     await selectNote(state.notes[0].id);
   } else if (state.notes.length === 0) {
-    editor.value = "";
+    editor.setText("");
     preview.innerHTML = "";
     showEmptyState();
   }
@@ -1850,8 +1875,9 @@ function showCopyToast(msg = "Copied!") {
 }
 
 function copyNoteMarkdown() {
-  if (!editor.value) return;
-  copyToClipboard(editor.value);
+  const text = editor.getText();
+  if (!text) return;
+  copyToClipboard(text);
   showCopyToast("Markdown copied!");
 }
 
@@ -1926,7 +1952,6 @@ function lazyHighlightCodeBlocks() {
 
 // ─── Lazy asset image loading ───
 let imageObserver = null;
-const blobCache = new Map();
 
 function lazyLoadAssetImages() {
   const pending = preview.querySelectorAll(".lazy-image[data-asset]");
@@ -1953,42 +1978,6 @@ function lazyLoadAssetImages() {
   pending.forEach((el) => imageObserver.observe(el));
 }
 
-async function loadAssetImage(container, assetName) {
-  try {
-    let blobUrl = blobCache.get(assetName);
-    if (!blobUrl) {
-      const base64 = await invoke("read_asset", { name: assetName });
-      const ext = assetName.split(".").pop().toLowerCase();
-      const mimeMap = {
-        png: "image/png",
-        jpg: "image/jpeg",
-        jpeg: "image/jpeg",
-        gif: "image/gif",
-        webp: "image/webp",
-        svg: "image/svg+xml",
-      };
-      const mime = mimeMap[ext] || "image/png";
-      const binary = atob(base64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      const blob = new Blob([bytes], { type: mime });
-      blobUrl = URL.createObjectURL(blob);
-      blobCache.set(assetName, blobUrl);
-    }
-    const img = document.createElement("img");
-    img.src = blobUrl;
-    img.alt = assetName;
-    img.className = "asset-image";
-    container.innerHTML = "";
-    container.appendChild(img);
-    container.classList.add("loaded");
-  } catch {
-    container.querySelector(".lazy-image-placeholder span").textContent =
-      "Failed to load image";
-    container.classList.add("error");
-  }
-}
-
 // setupAssetLinkClicks – removed: handled by delegated click on preview
 // setupExternalLinkClicks – removed: handled by delegated click on preview
 
@@ -2011,7 +2000,7 @@ function setupTodoAttributes() {
 }
 
 function toggleTodoInMarkdown(index, checked) {
-  const content = editor.value;
+  const content = editor.getText();
   const todoPattern = /^(\s*[-*+]\s*)\[([ xX])\]/gm;
   let match;
   let count = 0;
@@ -2021,7 +2010,9 @@ function toggleTodoInMarkdown(index, checked) {
       const newMark = checked ? "x" : " ";
       const before = content.slice(0, match.index + match[1].length + 1);
       const after = content.slice(match.index + match[1].length + 2);
-      editor.value = before + newMark + after;
+      const sel = editor.getSelection();
+      editor.setText(before + newMark + after);
+      editor.setSelection(sel.start, sel.end);
       state.dirty = true;
       // Save without re-rendering – the checkbox already reflects the new state
       // in the DOM (the user just toggled it). Only persist the markdown.
@@ -2039,10 +2030,9 @@ function saveTodoChange() {
   _todoSaveTimer = setTimeout(async () => {
     if (!state.currentId) return;
     invalidatePreviewCache(state.currentId);
-    await invoke("save_note", { id: state.currentId, content: editor.value });
+    const content = editor.getText();
+    await invoke("save_note", { id: state.currentId, content });
     state.dirty = false;
-    // Update just the metadata in the notes array (title/preview/modified)
-    const content = editor.value;
     const title =
       (content.split("\n")[0] || state.currentId)
         .replace(/^#+\s*/, "")
@@ -2085,8 +2075,9 @@ function setupDropHandler() {
 async function handleDroppedPaths(paths) {
   if (!state.currentId) return;
 
-  // Switch to edit mode if needed
-  if (state.mode !== "edit") {
+  // Drop into whatever editor is active. If we're in preview, jump to raw
+  // edit mode so the user sees the inserted markdown.
+  if (state.mode === "preview") {
     setMode("edit");
     editor.focus();
   }
@@ -2113,15 +2104,15 @@ async function handleDroppedPaths(paths) {
 }
 
 function insertAtCursor(text) {
-  const start = editor.selectionStart;
-  const end = editor.selectionEnd;
-  const before = editor.value.substring(0, start);
-  const after = editor.value.substring(end);
-  // Ensure we're on a new line
+  const { start, end } = editor.getSelection();
+  const v = editor.getText();
+  const before = v.substring(0, start);
+  const after = v.substring(end);
   const needsNewline = before.length > 0 && !before.endsWith("\n");
   const insert = (needsNewline ? "\n" : "") + text;
-  editor.value = before + insert + after;
-  editor.selectionStart = editor.selectionEnd = start + insert.length;
+  editor.setText(before + insert + after);
+  const pos = start + insert.length;
+  editor.setSelection(pos, pos);
   state.dirty = true;
   saveCurrentNote();
 }
@@ -2236,8 +2227,7 @@ function showEmptyState() {
       <span>Press <kbd>Cmd+N</kbd> to create one</span>
     </div>
   `;
-  preview.classList.add("visible");
-  editor.classList.remove("visible");
+  applyModeChrome("preview");
 }
 
 function updateTitle() {
@@ -2252,38 +2242,104 @@ function updateTitle() {
 }
 
 // ─── Mode switching ───
+// Three modes:
+//   - "edit"    : raw markdown textarea visible
+//   - "preview" : rendered HTML (marked) visible
+//   - "live"    : live-preview CodeMirror editor visible (lazy-loaded)
+//
+// "edit" and "live" both put an editor in front; the adapter's active
+// backend tracks which one owns the doc text. Switching between them
+// transfers the text over.
+
+const MODE_LABELS = {
+  edit: "editing",
+  preview: "preview",
+  live: "live",
+};
+
+let liveEditorEl = null; // populated on first switch into live mode
+let liveEditorLoadPromise = null;
+
+async function ensureLiveEditor() {
+  if (liveEditorEl) return liveEditorEl;
+  if (liveEditorLoadPromise) return liveEditorLoadPromise;
+  liveEditorLoadPromise = (async () => {
+    const mod = await import("./livepreview/index.js");
+    liveEditorEl = mod.setupLiveEditor({
+      container: document.getElementById("editor-area"),
+      adapter: editor,
+      onSaveTrigger: scheduleSave,
+      getActiveNoteId: () => state.currentId,
+    });
+    return liveEditorEl;
+  })();
+  return liveEditorLoadPromise;
+}
+
+function applyModeChrome(mode) {
+  state.mode = mode;
+  // Visibility — only one of the three surfaces is visible at a time.
+  editorEl.classList.toggle("visible", mode === "edit");
+  preview.classList.toggle("visible", mode === "preview");
+  if (liveEditorEl) liveEditorEl.classList.toggle("visible", mode === "live");
+  // Mode indicator
+  modeIndicator.textContent = MODE_LABELS[mode];
+  modeIndicator.classList.toggle("editing", mode === "edit" || mode === "live");
+}
 
 /** Switch mode DOM state without triggering renderPreview. Used by selectNote
  *  which manages rendering separately to avoid double-renders. */
 function setModeRaw(mode) {
-  state.mode = mode;
-  if (mode === "edit") {
-    editor.classList.add("visible");
-    preview.classList.remove("visible");
-    modeIndicator.textContent = "editing";
-    modeIndicator.classList.add("editing");
-  } else {
-    editor.classList.remove("visible");
-    preview.classList.add("visible");
-    modeIndicator.textContent = "preview";
-    modeIndicator.classList.remove("editing");
-  }
+  applyModeChrome(mode);
 }
 
+// Monotonic gen so a late ensureLiveEditor() resolution can detect that the
+// user already moved to a different mode and bail out instead of forcing the
+// live view back on screen.
+let _modeRequestGen = 0;
+
 function setMode(mode) {
-  state.mode = mode;
-  if (mode === "edit") {
-    editor.classList.add("visible");
-    preview.classList.remove("visible");
-    modeIndicator.textContent = "editing";
-    modeIndicator.classList.add("editing");
-  } else {
-    editor.classList.remove("visible");
-    preview.classList.add("visible");
-    renderPreview(editor.value, state.currentId);
-    modeIndicator.textContent = "preview";
-    modeIndicator.classList.remove("editing");
+  const gen = ++_modeRequestGen;
+
+  if (mode === "live") {
+    setPreferredEditor("live");
+    return ensureLiveEditor()
+      .then(() => {
+        if (gen !== _modeRequestGen) return;
+        editor.switchTo("live");
+        applyModeChrome("live");
+        editor.focus();
+      })
+      .catch((err) => {
+        if (gen !== _modeRequestGen) return;
+        console.error("Failed to load live editor:", err);
+        const detail = err && err.message ? err.message : String(err);
+        // Persist the full stack so the user can retrieve it from devtools
+        // localStorage even if the toast clipped the message.
+        try {
+          localStorage.setItem(
+            "raynote-live-error",
+            (err && err.stack) || detail,
+          );
+        } catch {}
+        showCopyToast("Live preview failed: " + detail.slice(0, 80));
+        editor.switchTo("textarea");
+        applyModeChrome("edit");
+        editor.focus();
+      });
   }
+
+  if (mode === "edit") {
+    setPreferredEditor("textarea");
+    editor.switchTo("textarea");
+    applyModeChrome("edit");
+    return Promise.resolve();
+  }
+
+  // preview — keep current backend as source of truth, just show the pane.
+  applyModeChrome("preview");
+  renderPreview(editor.getText(), state.currentId);
+  return Promise.resolve();
 }
 
 // ─── Command Palette ───
@@ -2331,7 +2387,18 @@ function getCommands() {
       {
         label: "Toggle Edit/Preview",
         hint: formatShortcut(state.shortcuts.toggleEdit),
-        action: () => setMode(state.mode === "edit" ? "preview" : "edit"),
+        action: () => {
+          if (state.mode === "edit" || state.mode === "live") {
+            setMode("preview");
+          } else {
+            setMode(getPreferredEditor() === "live" ? "live" : "edit");
+          }
+        },
+      },
+      {
+        label: "Toggle Live Preview",
+        hint: formatShortcut(state.shortcuts.toggleLive),
+        action: () => setMode(state.mode === "live" ? "preview" : "live"),
       },
       {
         label: "Pin Window on Top",
@@ -2588,14 +2655,16 @@ async function togglePin() {
 }
 
 // ─── Event listeners ───
+let _saveTimeout = null;
+function scheduleSave() {
+  state.dirty = true;
+  clearTimeout(_saveTimeout);
+  _saveTimeout = setTimeout(() => saveCurrentNote(), 800);
+}
+
 function setupEventListeners() {
-  // Editor input
-  let saveTimeout;
-  editor.addEventListener("input", () => {
-    state.dirty = true;
-    clearTimeout(saveTimeout);
-    saveTimeout = setTimeout(() => saveCurrentNote(), 800);
-  });
+  // Editor input — adapter forwards from whichever backend is active
+  editor.onInput(scheduleSave);
 
   // Search (debounced, backend-powered)
   search.addEventListener("input", () => {
@@ -2671,9 +2740,11 @@ function setupEventListeners() {
   setupDropHandler();
 
   // ─── Block web-app behaviors to feel native ───
-  // Prevent right-click context menu (except in text inputs and preview)
+  // Prevent right-click context menu (except in text inputs, preview, and the live editor)
   document.addEventListener("contextmenu", (e) => {
-    if (!e.target.closest("textarea, input, #preview")) e.preventDefault();
+    if (!e.target.closest("textarea, input, #preview, .cm-editor")) {
+      e.preventDefault();
+    }
   });
 
   // Block refresh, devtools, and other browser-revealing shortcuts
@@ -2722,6 +2793,11 @@ function setupEventListeners() {
     if (handleGlobalShortcutRecording(e)) return;
     if (handleShortcutRecording(e)) return;
 
+    // CM6 (live mode) handles its own keymap (undo, redo, indent, etc.) and
+    // calls preventDefault on those events. Don't double-fire app shortcuts
+    // that share keys with CM6 commands (Cmd+Z, Cmd+Shift+Z).
+    if (e.defaultPrevented) return;
+
     const sc = state.shortcuts;
 
     if (matchesShortcut(e, sc.openPalette)) {
@@ -2763,12 +2839,21 @@ function setupEventListeners() {
     if (matchesShortcut(e, sc.toggleEdit)) {
       e.preventDefault();
       if (state.currentId) {
-        if (state.mode === "edit") {
+        if (state.mode === "edit" || state.mode === "live") {
           setMode("preview");
         } else {
-          setMode("edit");
+          const target = getPreferredEditor() === "live" ? "live" : "edit";
+          setMode(target);
           editor.focus();
         }
+      }
+      return;
+    }
+
+    if (matchesShortcut(e, sc.toggleLive)) {
+      e.preventDefault();
+      if (state.currentId) {
+        setMode(state.mode === "live" ? "preview" : "live");
       }
       return;
     }
@@ -2838,13 +2923,13 @@ function setupEventListeners() {
       return;
     }
 
-    // Escape: exit settings, palette, or edit mode
+    // Escape: exit settings, palette, or any active editor mode
     if (e.key === "Escape") {
       if (state.settingsOpen) {
         closeSettings();
       } else if (state.paletteMode) {
         closePalette();
-      } else if (state.mode === "edit") {
+      } else if (state.mode === "edit" || state.mode === "live") {
         setMode("preview");
       }
       return;
@@ -2852,7 +2937,9 @@ function setupEventListeners() {
 
     const meta = e.metaKey || e.ctrlKey;
 
-    // Enter edit mode when typing (if in preview and no modifier)
+    // Enter edit mode when typing (if in preview and no modifier).
+    // Honors the persisted editor preference so a user who chose live mode
+    // doesn't get yanked back to raw textarea after relaunching.
     if (
       state.mode === "preview" &&
       state.currentId &&
@@ -2862,7 +2949,8 @@ function setupEventListeners() {
       !e.altKey &&
       e.key.length === 1
     ) {
-      setMode("edit");
+      const target = getPreferredEditor() === "live" ? "live" : "edit";
+      setMode(target);
       editor.focus();
     }
 
@@ -2913,15 +3001,17 @@ function setupEventListeners() {
     }
   });
 
-  // Tab handling and line duplicate in editor
-  editor.addEventListener("keydown", (e) => {
+  // Tab handling and line duplicate in the raw textarea. CM6 ships its own
+  // keymap (indentWithTab, copyLineUp/Down, moveLineUp/Down) so these handlers
+  // are intentionally textarea-scoped.
+  editorEl.addEventListener("keydown", (e) => {
     if (e.key === "Tab") {
       e.preventDefault();
-      const start = editor.selectionStart;
-      const end = editor.selectionEnd;
-      editor.value =
-        editor.value.substring(0, start) + "  " + editor.value.substring(end);
-      editor.selectionStart = editor.selectionEnd = start + 2;
+      const start = editorEl.selectionStart;
+      const end = editorEl.selectionEnd;
+      editorEl.value =
+        editorEl.value.substring(0, start) + "  " + editorEl.value.substring(end);
+      editorEl.selectionStart = editorEl.selectionEnd = start + 2;
       state.dirty = true;
     }
 
@@ -2932,23 +3022,23 @@ function setupEventListeners() {
       e.shiftKey
     ) {
       e.preventDefault();
-      const val = editor.value;
-      const cursor = editor.selectionStart;
-      const selEnd = editor.selectionEnd;
+      const val = editorEl.value;
+      const cursor = editorEl.selectionStart;
+      const selEnd = editorEl.selectionEnd;
       const lineStart = val.lastIndexOf("\n", cursor - 1) + 1;
       const lineEnd = val.indexOf("\n", selEnd);
       const end = lineEnd === -1 ? val.length : lineEnd;
       const line = val.slice(lineStart, end);
 
       if (e.key === "ArrowDown") {
-        editor.value = val.slice(0, end) + "\n" + line + val.slice(end);
-        editor.selectionStart = cursor + line.length + 1;
-        editor.selectionEnd = selEnd + line.length + 1;
+        editorEl.value = val.slice(0, end) + "\n" + line + val.slice(end);
+        editorEl.selectionStart = cursor + line.length + 1;
+        editorEl.selectionEnd = selEnd + line.length + 1;
       } else {
-        editor.value =
+        editorEl.value =
           val.slice(0, lineStart) + line + "\n" + val.slice(lineStart);
-        editor.selectionStart = cursor;
-        editor.selectionEnd = selEnd;
+        editorEl.selectionStart = cursor;
+        editorEl.selectionEnd = selEnd;
       }
       state.dirty = true;
     }
@@ -2962,9 +3052,9 @@ function setupEventListeners() {
       (e.key === "ArrowDown" || e.key === "ArrowUp")
     ) {
       e.preventDefault();
-      const val = editor.value;
-      const cursor = editor.selectionStart;
-      const selEnd = editor.selectionEnd;
+      const val = editorEl.value;
+      const cursor = editorEl.selectionStart;
+      const selEnd = editorEl.selectionEnd;
       const blockStart = val.lastIndexOf("\n", cursor - 1) + 1;
       const lineEndIdx = val.indexOf("\n", selEnd);
       const blockEnd = lineEndIdx === -1 ? val.length : lineEndIdx;
@@ -2974,15 +3064,15 @@ function setupEventListeners() {
         const prevLineStart = val.lastIndexOf("\n", blockStart - 2) + 1;
         const block = val.slice(blockStart, blockEnd);
         const prevLine = val.slice(prevLineStart, blockStart - 1);
-        editor.value =
+        editorEl.value =
           val.slice(0, prevLineStart) +
           block +
           "\n" +
           prevLine +
           val.slice(blockEnd);
         const offset = -(prevLine.length + 1);
-        editor.selectionStart = cursor + offset;
-        editor.selectionEnd = selEnd + offset;
+        editorEl.selectionStart = cursor + offset;
+        editorEl.selectionEnd = selEnd + offset;
       } else {
         if (blockEnd >= val.length) return;
         const nextLineEndIdx = val.indexOf("\n", blockEnd + 1);
@@ -2990,18 +3080,18 @@ function setupEventListeners() {
           nextLineEndIdx === -1 ? val.length : nextLineEndIdx;
         const block = val.slice(blockStart, blockEnd);
         const nextLine = val.slice(blockEnd + 1, nextLineEnd);
-        editor.value =
+        editorEl.value =
           val.slice(0, blockStart) +
           nextLine +
           "\n" +
           block +
           val.slice(nextLineEnd);
         const offset = nextLine.length + 1;
-        editor.selectionStart = cursor + offset;
-        editor.selectionEnd = selEnd + offset;
+        editorEl.selectionStart = cursor + offset;
+        editorEl.selectionEnd = selEnd + offset;
       }
       state.dirty = true;
-      editor.dispatchEvent(new Event("input", { bubbles: true }));
+      editorEl.dispatchEvent(new Event("input", { bubbles: true }));
     }
   });
 }

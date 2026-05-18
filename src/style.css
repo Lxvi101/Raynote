@@ -470,6 +470,38 @@ html, body {
   pointer-events: auto;
 }
 
+/* ─── Live preview (CodeMirror 6) ─── */
+#live-editor {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+}
+
+#live-editor.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#live-editor .cm-editor {
+  height: 100%;
+  background: transparent;
+}
+
+#live-editor .cm-editor.cm-focused {
+  outline: none;
+}
+
+/* Match preview's invisible scrollbar so the live view feels the same. */
+#live-editor .cm-scroller {
+  scrollbar-width: none;
+}
+
+#live-editor .cm-scroller::-webkit-scrollbar {
+  display: none;
+}
+
 #preview {
   position: absolute;
   inset: 0;
