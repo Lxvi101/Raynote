@@ -685,7 +685,7 @@ const state = {
 
 // ─── Preview HTML cache ───
 const previewCache = new Map(); // Map<noteId, { html: string, content: string }>
-const PREVIEW_CACHE_MAX = 20;
+const PREVIEW_CACHE_MAX = 60;
 let renderGeneration = 0; // monotonically increasing; guards against race conditions
 
 function cachePreviewHtml(noteId, content, html) {
@@ -710,6 +710,36 @@ function getCachedPreviewHtml(noteId, content) {
 
 function invalidatePreviewCache(noteId) {
   previewCache.delete(noteId);
+}
+
+// ─── Note content cache ───
+// Switching to a note used to re-read it from disk every time via the
+// read_note IPC call. Notes live in iCloud Drive, so that round-trip can
+// stall on an on-demand download — which is what made note switching lag
+// even though the *rendered* HTML was cached. Keep the raw content around
+// too, keyed by id, refreshed on save and dropped on delete.
+const contentCache = new Map(); // Map<noteId, string>
+const CONTENT_CACHE_MAX = 80;
+
+function cacheContent(noteId, content) {
+  if (contentCache.size >= CONTENT_CACHE_MAX && !contentCache.has(noteId)) {
+    contentCache.delete(contentCache.keys().next().value);
+  }
+  contentCache.delete(noteId); // re-insert moves it to MRU position
+  contentCache.set(noteId, content);
+}
+
+/** Returns the cached content string, or null if this note isn't cached. */
+function getCachedContent(noteId) {
+  if (!contentCache.has(noteId)) return null;
+  const content = contentCache.get(noteId);
+  contentCache.delete(noteId);
+  contentCache.set(noteId, content); // bump to MRU
+  return content;
+}
+
+function invalidateContentCache(noteId) {
+  contentCache.delete(noteId);
 }
 
 // ─── DOM refs ───
@@ -861,153 +891,210 @@ function createSettingsPanel() {
   panel.className = "hidden";
   panel.innerHTML = `
     <div class="settings-backdrop"></div>
-    <div class="settings-modal">
-      <div class="settings-header">
-        <div class="settings-tabs">
-          <button class="settings-tab active" data-tab="general">General</button>
-          <button class="settings-tab" data-tab="ai">AI</button>
-          <button class="settings-tab" data-tab="shortcuts">Shortcuts</button>
+    <div class="settings-modal" role="dialog" aria-label="Settings">
+      <aside class="settings-sidebar">
+        <div class="settings-identity">
+          <div class="settings-identity-badge"></div>
+          <div class="settings-identity-text">
+            <span class="settings-identity-name">Raynote</span>
+            <span class="settings-identity-sub">Settings</span>
+          </div>
         </div>
+        <nav class="settings-nav">
+          <button class="settings-nav-item active" data-cat="general">
+            <span class="settings-nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>
+            <span>General</span>
+          </button>
+          <button class="settings-nav-item" data-cat="appearance">
+            <span class="settings-nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.4" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.6V14.4A6.4 6.4 0 0 0 8 1.6Z" fill="currentColor"/></svg></span>
+            <span>Appearance</span>
+          </button>
+          <button class="settings-nav-item" data-cat="shortcuts">
+            <span class="settings-nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="1.6" y="4" width="12.8" height="8" rx="1.8" stroke="currentColor" stroke-width="1.3"/><path d="M4 6.4h.01M6.4 6.4h.01M8.8 6.4h.01M11.2 6.4h.01M5 9.4h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>
+            <span>Shortcuts</span>
+          </button>
+          <button class="settings-nav-item" data-cat="ai">
+            <span class="settings-nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1.3 3.4 3.4 1.3-3.4 1.3L8 11l-1.3-3.5L3.2 6.2l3.5-1.3L8 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M12.5 10.5l.6 1.5 1.5.6-1.5.6-.6 1.5-.6-1.5-1.5-.6 1.5-.6.6-1.5Z" fill="currentColor"/></svg></span>
+            <span>AI</span>
+          </button>
+          <button class="settings-nav-item" data-cat="about">
+            <span class="settings-nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.4" stroke="currentColor" stroke-width="1.3"/><path d="M8 7.2v4M8 4.9h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+            <span>About</span>
+          </button>
+        </nav>
+      </aside>
+      <section class="settings-content">
         <button class="settings-close-btn" title="Close (Esc)">
-          <svg width="14" height="14" viewBox="0 0 14 14"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <svg width="13" height="13" viewBox="0 0 14 14"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
         </button>
-      </div>
-      <div class="settings-body">
-        <div class="settings-page" data-page="general">
-          <div class="settings-section">
-            <div class="settings-section-title">Appearance</div>
-            <div class="setting-row">
-              <div class="setting-info">
-                <span class="setting-label">Hide from Dock</span>
-                <span class="setting-desc">App stays in the menu bar tray only</span>
+        <div class="settings-scroll">
+          <div class="settings-cat" data-cat="general">
+            <h2 class="settings-cat-title">General</h2>
+            <div class="settings-group">
+              <div class="settings-group-title">New Notes</div>
+              <div class="settings-card">
+                <div class="settings-item settings-item-stacked">
+                  <div class="setting-info">
+                    <span class="setting-label">Title</span>
+                    <span class="setting-desc">What appears in the title field when you create a new note</span>
+                  </div>
+                  <select id="setting-new-note-title-mode" class="setting-input setting-select">
+                    <option value="auto">Auto-generate from content</option>
+                    <option value="manual">Write title manually</option>
+                    <option value="empty">Skip — empty note</option>
+                  </select>
+                </div>
               </div>
-              <label class="toggle-switch">
-                <input type="checkbox" id="toggle-dock-hide" />
-                <span class="toggle-track"><span class="toggle-thumb"></span></span>
-              </label>
+              <div class="settings-group-caption"><strong>Auto-generate</strong> lets the AI write a title from your content (configure the provider in the AI tab). <strong>Write manually</strong> starts the cursor right after <code>#&nbsp;</code>. <strong>Skip</strong> creates an empty note with the cursor at the top.</div>
             </div>
           </div>
-          <div class="settings-section">
-            <div class="settings-section-title">Edge Glow</div>
-            <div class="settings-section-desc">A soft red rim that slowly sweeps around the window. Freeze it at the top, resize it, dim it, or turn it off entirely.</div>
-            <div class="setting-row">
-              <div class="setting-info">
-                <span class="setting-label">Enable</span>
-                <span class="setting-desc">Show the rim and the inner glow</span>
+
+          <div class="settings-cat hidden" data-cat="appearance">
+            <h2 class="settings-cat-title">Appearance</h2>
+            <div class="settings-group">
+              <div class="settings-group-title">Dock</div>
+              <div class="settings-card">
+                <div class="settings-item">
+                  <div class="setting-info">
+                    <span class="setting-label">Hide from Dock</span>
+                    <span class="setting-desc">App stays in the menu bar tray only</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="toggle-dock-hide" />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  </label>
+                </div>
               </div>
-              <label class="toggle-switch">
-                <input type="checkbox" id="toggle-glow-enabled" />
-                <span class="toggle-track"><span class="toggle-thumb"></span></span>
-              </label>
             </div>
-            <div class="setting-row">
-              <div class="setting-info">
-                <span class="setting-label">Static</span>
-                <span class="setting-desc">Stop the sweep — keep a fixed glow centered at the top</span>
+            <div class="settings-group">
+              <div class="settings-group-title">Edge Glow</div>
+              <div class="settings-card">
+                <div class="settings-item">
+                  <div class="setting-info">
+                    <span class="setting-label">Enable</span>
+                    <span class="setting-desc">Show the rim and the inner glow</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="toggle-glow-enabled" />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  </label>
+                </div>
+                <div class="settings-item">
+                  <div class="setting-info">
+                    <span class="setting-label">Static</span>
+                    <span class="setting-desc">Stop the sweep — keep a fixed glow centered at the top</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="toggle-glow-static" />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  </label>
+                </div>
+                <div class="settings-item settings-item-stacked">
+                  <div class="setting-info">
+                    <span class="setting-label">Width</span>
+                    <span class="setting-desc">Thickness of the crisp rim line on the edge</span>
+                  </div>
+                  <input type="range" id="setting-glow-width" class="setting-range" min="0" max="100" step="1" />
+                </div>
+                <div class="settings-item settings-item-stacked">
+                  <div class="setting-info">
+                    <span class="setting-label">Size</span>
+                    <span class="setting-desc">How far the inner glow reaches toward the center</span>
+                  </div>
+                  <input type="range" id="setting-glow-size" class="setting-range" min="0" max="100" step="1" />
+                </div>
+                <div class="settings-item settings-item-stacked">
+                  <div class="setting-info">
+                    <span class="setting-label">Intensity</span>
+                    <span class="setting-desc">How strong the glow looks overall</span>
+                  </div>
+                  <input type="range" id="setting-glow-intensity" class="setting-range" min="0" max="100" step="1" />
+                </div>
               </div>
-              <label class="toggle-switch">
-                <input type="checkbox" id="toggle-glow-static" />
-                <span class="toggle-track"><span class="toggle-thumb"></span></span>
-              </label>
-            </div>
-            <div class="setting-row setting-row-stacked">
-              <div class="setting-info">
-                <span class="setting-label">Width</span>
-                <span class="setting-desc">Thickness of the crisp rim line on the edge</span>
-              </div>
-              <input type="range" id="setting-glow-width" class="setting-range" min="0" max="100" step="1" />
-            </div>
-            <div class="setting-row setting-row-stacked">
-              <div class="setting-info">
-                <span class="setting-label">Size</span>
-                <span class="setting-desc">How far the inner glow reaches toward the center</span>
-              </div>
-              <input type="range" id="setting-glow-size" class="setting-range" min="0" max="100" step="1" />
-            </div>
-            <div class="setting-row setting-row-stacked">
-              <div class="setting-info">
-                <span class="setting-label">Intensity</span>
-                <span class="setting-desc">How strong the glow looks overall</span>
-              </div>
-              <input type="range" id="setting-glow-intensity" class="setting-range" min="0" max="100" step="1" />
+              <div class="settings-group-caption">A soft red rim that slowly sweeps around the window. Freeze it at the top, resize it, dim it, or turn it off entirely.</div>
             </div>
           </div>
-          <div class="settings-section">
-            <div class="settings-section-title">New Notes</div>
-            <div class="setting-row setting-row-stacked">
-              <div class="setting-info">
-                <span class="setting-label">Title</span>
-                <span class="setting-desc">What appears in the title field when you create a new note. <strong>Auto-generate</strong> lets the AI write a title from your content (configure the provider in the AI tab). <strong>Write manually</strong> starts the cursor right after <code>#&nbsp;</code>. <strong>Skip</strong> creates an empty note with the cursor at the top.</span>
+
+          <div class="settings-cat hidden" data-cat="shortcuts">
+            <h2 class="settings-cat-title">Shortcuts</h2>
+            <div class="settings-group">
+              <div class="settings-group-title">Global Shortcuts</div>
+              <div class="settings-card">
+                <div id="global-shortcuts-list"></div>
               </div>
-              <select id="setting-new-note-title-mode" class="setting-input setting-select">
-                <option value="auto">Auto-generate from content</option>
-                <option value="manual">Write title manually</option>
-                <option value="empty">Skip — empty note</option>
-              </select>
-            </div>
-          </div>
-          <div class="settings-section">
-            <div class="settings-section-title">Global Shortcuts</div>
-            <div class="settings-section-desc">System-wide hotkeys that work even when Raynote isn't focused. Click to record, press Escape to cancel.</div>
-            <div id="global-shortcuts-list"></div>
-            <div class="setting-row" id="global-shortcut-error" style="display: none;">
-              <div class="setting-info">
+              <div class="settings-group-caption">System-wide hotkeys that work even when Raynote isn't focused. Click to record, press Escape to cancel.</div>
+              <div class="settings-inline-error" id="global-shortcut-error" style="display: none;">
                 <span class="setting-label" style="color: var(--danger);">Shortcut conflict</span>
                 <span class="setting-desc" id="global-shortcut-error-msg"></span>
               </div>
             </div>
-          </div>
-          <div class="settings-section">
-            <div class="settings-section-title">System</div>
-            <div class="setting-row">
-              <div class="setting-info">
-                <span class="setting-label">Storage</span>
-                <span class="setting-desc">Notes sync via iCloud Drive automatically</span>
+            <div class="settings-group">
+              <div class="settings-group-title">Keyboard Shortcuts</div>
+              <div class="settings-card">
+                <div id="shortcuts-list"></div>
               </div>
-              <span class="setting-badge">iCloud</span>
+              <div class="settings-group-caption">Click any shortcut to rebind. Press Escape to cancel.</div>
+            </div>
+          </div>
+
+          <div class="settings-cat hidden" data-cat="ai">
+            <h2 class="settings-cat-title">AI</h2>
+            <div class="settings-group">
+              <div class="settings-group-title">Auto-Title</div>
+              <div class="settings-card">
+                <div class="settings-item settings-item-stacked">
+                  <div class="setting-info">
+                    <span class="setting-label">API Key</span>
+                    <span class="setting-desc">Your OpenRouter API key (or any OpenAI-compatible provider)</span>
+                  </div>
+                  <div class="setting-input-wrap">
+                    <input type="password" id="setting-ai-api-key" class="setting-input" placeholder="sk-or-v1-..." spellcheck="false" autocomplete="off" />
+                    <button class="setting-input-toggle" id="toggle-api-key-vis" title="Show / hide key" aria-label="Toggle key visibility">
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3C4.4 3 1.4 5.4.5 8c.9 2.6 3.9 5 7.5 5s6.6-2.4 7.5-5c-.9-2.6-3.9-5-7.5-5Zm0 8.3A3.3 3.3 0 1 1 8 4.7a3.3 3.3 0 0 1 0 6.6Zm0-5.3a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z" fill="currentColor"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="settings-item settings-item-stacked">
+                  <div class="setting-info">
+                    <span class="setting-label">Model</span>
+                    <span class="setting-desc">The model used to generate titles</span>
+                  </div>
+                  <input type="text" id="setting-ai-model" class="setting-input" placeholder="${DEFAULT_AI_MODEL}" spellcheck="false" autocomplete="off" />
+                </div>
+                <div class="settings-item settings-item-stacked">
+                  <div class="setting-info">
+                    <span class="setting-label">Base URL</span>
+                    <span class="setting-desc">API endpoint (OpenAI-compatible <code>/chat/completions</code>)</span>
+                  </div>
+                  <input type="text" id="setting-ai-base-url" class="setting-input" placeholder="${DEFAULT_AI_BASE_URL}" spellcheck="false" autocomplete="off" />
+                </div>
+              </div>
+              <div class="settings-group-caption">When <em>New Notes → Title</em> is set to <strong>Auto-generate</strong>, new notes get a <code>{{auto_generate}}</code> heading so you can start typing immediately, and the title is generated from your content when you switch away. These credentials are unused for the other title modes.</div>
+            </div>
+          </div>
+
+          <div class="settings-cat hidden" data-cat="about">
+            <h2 class="settings-cat-title">About</h2>
+            <div class="settings-about">
+              <div class="settings-about-badge"></div>
+              <div class="settings-about-name">Raynote</div>
+              <div class="settings-about-tag">A minimal markdown note-taking app</div>
+            </div>
+            <div class="settings-group">
+              <div class="settings-group-title">Storage</div>
+              <div class="settings-card">
+                <div class="settings-item">
+                  <div class="setting-info">
+                    <span class="setting-label">Notes Location</span>
+                    <span class="setting-desc">Notes sync automatically across your devices</span>
+                  </div>
+                  <span class="setting-badge">iCloud Drive</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>
-        <div class="settings-page hidden" data-page="ai">
-          <div class="settings-section">
-            <div class="settings-section-title">Auto-Title</div>
-            <div class="settings-section-desc">When <em>New Notes → Title</em> is set to <strong>Auto-generate</strong>, new notes get a <code>{{auto_generate}}</code> heading so you can start typing immediately, and the title is generated from your content when you switch away. These credentials are unused for the other title modes.</div>
-            <div class="setting-row setting-row-stacked">
-              <div class="setting-info">
-                <span class="setting-label">API Key</span>
-                <span class="setting-desc">Your OpenRouter API key (or any OpenAI-compatible provider)</span>
-              </div>
-              <div class="setting-input-wrap">
-                <input type="password" id="setting-ai-api-key" class="setting-input" placeholder="sk-or-v1-..." spellcheck="false" autocomplete="off" />
-                <button class="setting-input-toggle" id="toggle-api-key-vis" title="Show / hide key" aria-label="Toggle key visibility">
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3C4.4 3 1.4 5.4.5 8c.9 2.6 3.9 5 7.5 5s6.6-2.4 7.5-5c-.9-2.6-3.9-5-7.5-5Zm0 8.3A3.3 3.3 0 1 1 8 4.7a3.3 3.3 0 0 1 0 6.6Zm0-5.3a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z" fill="currentColor"/></svg>
-                </button>
-              </div>
-            </div>
-            <div class="setting-row setting-row-stacked">
-              <div class="setting-info">
-                <span class="setting-label">Model</span>
-                <span class="setting-desc">The model used to generate titles</span>
-              </div>
-              <input type="text" id="setting-ai-model" class="setting-input" placeholder="${DEFAULT_AI_MODEL}" spellcheck="false" autocomplete="off" />
-            </div>
-            <div class="setting-row setting-row-stacked">
-              <div class="setting-info">
-                <span class="setting-label">Base URL</span>
-                <span class="setting-desc">API endpoint (OpenAI-compatible <code>/chat/completions</code>)</span>
-              </div>
-              <input type="text" id="setting-ai-base-url" class="setting-input" placeholder="${DEFAULT_AI_BASE_URL}" spellcheck="false" autocomplete="off" />
-            </div>
-          </div>
-        </div>
-        <div class="settings-page hidden" data-page="shortcuts">
-          <div class="settings-section">
-            <div class="settings-section-title">Keyboard Shortcuts</div>
-            <div class="settings-section-desc">Click any shortcut to rebind. Press Escape to cancel.</div>
-            <div id="shortcuts-list"></div>
-          </div>
-        </div>
-      </div>
+      </section>
     </div>
   `;
   document.getElementById("app").appendChild(panel);
@@ -1019,19 +1106,21 @@ function createSettingsPanel() {
     .querySelector(".settings-close-btn")
     .addEventListener("click", closeSettings);
 
-  // Tab switching
-  panel.querySelectorAll(".settings-tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
+  // Sidebar category switching
+  const settingsScroll = panel.querySelector(".settings-scroll");
+  panel.querySelectorAll(".settings-nav-item").forEach((item) => {
+    item.addEventListener("click", () => {
       panel
-        .querySelectorAll(".settings-tab")
+        .querySelectorAll(".settings-nav-item")
         .forEach((t) => t.classList.remove("active"));
-      tab.classList.add("active");
+      item.classList.add("active");
       panel
-        .querySelectorAll(".settings-page")
+        .querySelectorAll(".settings-cat")
         .forEach((p) => p.classList.add("hidden"));
       panel
-        .querySelector(`.settings-page[data-page="${tab.dataset.tab}"]`)
+        .querySelector(`.settings-cat[data-cat="${item.dataset.cat}"]`)
         .classList.remove("hidden");
+      if (settingsScroll) settingsScroll.scrollTop = 0;
     });
   });
 
@@ -1376,10 +1465,11 @@ async function init() {
     applyStickyTintById(stickyTintIdFromStorage(raw) || "mist");
   }
 
-  await loadNotes();
+  await loadNotesInitial();
 
-  // Sidebar is now painted — drop the splash before we start fetching/rendering
-  // the first note. Markdown render uses the existing .preview-loading spinner.
+  // Sidebar is now painted (and the background scan has finished) — drop the
+  // splash before we start fetching/rendering the first note. Markdown render
+  // uses the existing .preview-loading spinner.
   hideSplash();
 
   if (isSticky) {
@@ -1415,6 +1505,44 @@ async function init() {
 
   setupEventListeners();
   setupTauriListeners();
+}
+
+// First load on the main window. The note-metadata scan now runs in the
+// background (see the Rust setup hook), so an empty result here can mean
+// "scan not finished yet" rather than "no notes". Keep waiting — and let the
+// caller keep the splash up — until the scan actually completes, instead of
+// flashing an empty state.
+async function loadNotesInitial() {
+  await loadNotes();
+  if (state.notes.length > 0 || isSticky) return;
+  if (!(await invoke("notes_loading"))) {
+    // Scan finished between the two calls above — pick up its results.
+    await loadNotes();
+    return;
+  }
+  await new Promise((resolve) => {
+    let settled = false;
+    let unlisten = null;
+    let poll = null;
+    const settle = async () => {
+      if (settled) return;
+      settled = true;
+      if (poll) clearInterval(poll);
+      if (unlisten) unlisten();
+      await loadNotes();
+      resolve();
+    };
+    // Normal path: the backend emits this once the scan completes.
+    listen("notes-loaded", settle).then((fn) => {
+      unlisten = fn;
+      if (settled) fn();
+    });
+    // Safety net: if the event fired before this listener attached (very
+    // fast scan), the flag will still flip — poll it as a fallback.
+    poll = setInterval(async () => {
+      if (!(await invoke("notes_loading"))) settle();
+    }, 200);
+  });
 }
 
 // ─── Notes CRUD ───
@@ -1484,7 +1612,11 @@ async function selectNote(id) {
 
   const prevId = state.currentId;
   state.currentId = id;
-  const content = await invoke("read_note", { id });
+  let content = getCachedContent(id);
+  if (content === null) {
+    content = await invoke("read_note", { id });
+    cacheContent(id, content);
+  }
   editor.setText(content);
 
   // Update sidebar immediately (before any heavy render work)
@@ -1550,6 +1682,7 @@ async function saveCurrentNote() {
   if (!state.currentId) return;
   invalidatePreviewCache(state.currentId);
   const content = editor.getText();
+  cacheContent(state.currentId, content); // keep cache in sync with disk
   await invoke("save_note", { id: state.currentId, content });
   state.dirty = false;
   const rawTitle =
@@ -1750,6 +1883,7 @@ async function deleteCurrentNote() {
   const wasPinned = isNotePinned(state.currentId);
   const id = state.currentId;
   invalidatePreviewCache(id);
+  invalidateContentCache(id);
 
   await invoke("delete_note", { id });
 
@@ -1802,6 +1936,8 @@ async function redoDeleteNote() {
   if (redoDeleteStack.length === 0) return;
   const { id, wasPinned } = redoDeleteStack.pop();
 
+  invalidatePreviewCache(id);
+  invalidateContentCache(id);
   await invoke("delete_note", { id });
   undoDeleteStack.push({ id, wasPinned });
 

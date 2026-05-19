@@ -71,6 +71,11 @@ struct PaginatedNotes {
 
 struct AppState {
     notes_cache: RwLock<Vec<NoteMeta>>,
+    /// False until the initial directory scan that populates `notes_cache`
+    /// has finished. The scan runs off the main thread so the window can
+    /// appear immediately; the frontend polls this / waits for the
+    /// `notes-loaded` event before showing an empty state.
+    scan_done: RwLock<bool>,
     /// Currently-registered "capture" (quick-capture / show window) global shortcut.
     capture_shortcut: RwLock<Option<Shortcut>>,
     /// Currently-registered "toggle" (show/hide window) global shortcut.
@@ -109,12 +114,27 @@ fn parse_note_meta(id: String, content: &str, modified: u64) -> NoteMeta {
     }
 }
 
+/// Read just enough of a note to derive its metadata.
+///
+/// `parse_note_meta` only looks at the first line (title) and the next two
+/// (preview), so reading the whole file is wasteful — and actively slow here,
+/// since notes live in iCloud Drive where a full read of an evicted file
+/// triggers a blocking download. One bounded read of the head of the file is
+/// plenty for a title + 100-char preview and keeps the startup scan cheap.
+fn read_meta_prefix(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut file = fs::File::open(path)?;
+    let mut buf = [0u8; 4096];
+    let n = file.read(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf[..n]).into_owned())
+}
+
 fn note_meta_from_md_path(path: &Path) -> Option<NoteMeta> {
     if !path.extension().map_or(false, |e| e == "md") {
         return None;
     }
     let id = path.file_stem()?.to_string_lossy().to_string();
-    let content = fs::read_to_string(path).ok()?;
+    let content = read_meta_prefix(path).ok()?;
     let modified = fs::metadata(path)
         .ok()
         .and_then(|m| m.modified().ok())
@@ -171,6 +191,14 @@ fn search_notes(state: State<'_, AppState>, query: String, limit: usize) -> Vec<
         .take(limit)
         .cloned()
         .collect()
+}
+
+/// True while the initial note-directory scan is still running. The frontend
+/// uses this to decide whether an empty `notes_cache` means "no notes" or
+/// "not loaded yet".
+#[tauri::command]
+fn notes_loading(state: State<'_, AppState>) -> bool {
+    !*state.scan_done.read().unwrap()
 }
 
 #[tauri::command]
@@ -582,13 +610,29 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            let initial_notes = read_all_notes();
             let capture = default_capture_shortcut();
             let toggle = default_toggle_shortcut();
             app.manage(AppState {
-                notes_cache: RwLock::new(initial_notes),
+                notes_cache: RwLock::new(Vec::new()),
+                scan_done: RwLock::new(false),
                 capture_shortcut: RwLock::new(Some(capture)),
                 toggle_shortcut: RwLock::new(Some(toggle)),
+            });
+
+            // Scan the notes directory off the main thread. read_all_notes()
+            // opens every file in an iCloud-synced folder, which can block for
+            // a long time on first run — doing it inline here would hold up
+            // the window from appearing at all. The frontend keeps the splash
+            // up until the "notes-loaded" event fires (or notes_loading clears).
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let notes = read_all_notes();
+                {
+                    let state = handle.state::<AppState>();
+                    *state.notes_cache.write().unwrap() = notes;
+                    *state.scan_done.write().unwrap() = true;
+                }
+                let _ = handle.emit("notes-loaded", ());
             });
 
             // Register the defaults. If either fails (e.g. another running app
@@ -631,6 +675,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_notes,
             list_notes_paginated,
+            notes_loading,
             search_notes,
             read_note,
             save_note,
@@ -648,6 +693,19 @@ pub fn run() {
             create_sticky_window,
             set_global_shortcut,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Raynote");
+        .build(tauri::generate_context!())
+        .expect("error while running Raynote")
+        .run(|_app_handle, _event| {
+            // The main window is hidden (not closed) when dismissed, so the
+            // app keeps its dock icon. Clicking that icon fires Reopen
+            // (applicationShouldHandleReopen) instead of restoring the
+            // window — macOS won't unhide it for us. Always bring it back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                if let Some(window) = _app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        });
 }
