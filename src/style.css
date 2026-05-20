@@ -14,6 +14,12 @@
   --accent: #7c6ff7;
   --accent-glow: rgba(124, 111, 247, 0.25);
   --danger: #f74f6f;
+  /* Red "edge-glow" accent — matches the rim sweep rgb(255, 70, 90). Used to
+     theme the settings panel and code so they read in the app's red identity
+     rather than the purple --accent. */
+  --accent-red: #ff465a;
+  --accent-red-bright: #ff96a0;
+  --accent-red-glow: rgba(255, 70, 90, 0.25);
   --radius: 10px;
   --radius-lg: 14px;
   --transition: 180ms cubic-bezier(0.4, 0, 0.2, 1);
@@ -608,7 +614,7 @@ html, body {
   background: var(--surface-active);
   padding: 2px 6px;
   border-radius: 4px;
-  color: #c4b5fd;
+  color: var(--accent-red-bright);
 }
 
 #preview code.inline-code {
@@ -618,9 +624,9 @@ html, body {
 }
 
 #preview code.inline-code:hover {
-  background: rgba(124, 111, 247, 0.22);
-  color: #e0d6ff;
-  box-shadow: 0 0 0 1px rgba(124, 111, 247, 0.35);
+  background: rgba(255, 70, 90, 0.20);
+  color: #ffd2d8;
+  box-shadow: 0 0 0 1px rgba(255, 70, 90, 0.4);
 }
 
 #preview code.inline-code.copied {
@@ -898,6 +904,12 @@ html, body {
   color: var(--text-dim);
 }
 
+.preview-loading-with-text {
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+}
+
 .preview-loading::after {
   content: "";
   width: 20px;
@@ -910,6 +922,25 @@ html, body {
 
 @keyframes preview-spin {
   to { transform: rotate(360deg); }
+}
+
+.note-list-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.note-list-loading-spinner {
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: preview-spin 0.7s linear infinite;
+  flex: 0 0 auto;
 }
 
 /* ─── Command Palette ─── */
@@ -1083,6 +1114,10 @@ html, body {
 /* ─── Settings Panel ─── */
 /* ─── Settings (macOS System Settings layout) ─── */
 #settings-panel {
+  /* Scope the whole panel to the red edge-glow accent. Every
+     var(--accent)/var(--accent-glow) below inherits these. */
+  --accent: var(--accent-red);
+  --accent-glow: var(--accent-red-glow);
   position: fixed;
   inset: 0;
   z-index: 150;
@@ -1148,7 +1183,7 @@ html, body {
   height: 30px;
   flex-shrink: 0;
   border-radius: 50%;
-  background: conic-gradient(from 210deg, #ffb27c, #f74f6f 35%, #7c6ff7 70%, #ffb27c);
+  background: conic-gradient(from 210deg, #ff9a7a, #ff465a 38%, #b51e30 72%, #ff9a7a);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35),
               inset 0 0 0 1px rgba(255, 255, 255, 0.12);
 }
@@ -1209,7 +1244,7 @@ html, body {
 .settings-nav-item.active {
   background: var(--accent);
   color: #fff;
-  box-shadow: 0 2px 8px rgba(124, 111, 247, 0.35);
+  box-shadow: 0 2px 10px rgba(255, 70, 90, 0.4);
 }
 
 .settings-nav-icon {
@@ -1381,8 +1416,8 @@ html, body {
   font-weight: 500;
   color: var(--accent);
   padding: 4px 10px;
-  background: rgba(124, 111, 247, 0.10);
-  border: 1px solid rgba(124, 111, 247, 0.16);
+  background: rgba(255, 70, 90, 0.12);
+  border: 1px solid rgba(255, 70, 90, 0.22);
   border-radius: 6px;
   letter-spacing: 0.02em;
 }
@@ -1401,7 +1436,7 @@ html, body {
   height: 72px;
   border-radius: 50%;
   margin-bottom: 16px;
-  background: conic-gradient(from 210deg, #ffb27c, #f74f6f 35%, #7c6ff7 70%, #ffb27c);
+  background: conic-gradient(from 210deg, #ff9a7a, #ff465a 38%, #b51e30 72%, #ff9a7a);
   box-shadow: 0 8px 26px rgba(0, 0, 0, 0.45),
               inset 0 0 0 1px rgba(255, 255, 255, 0.12);
 }
@@ -1471,7 +1506,7 @@ html, body {
 }
 
 .shortcut-row.recording {
-  background: rgba(124, 111, 247, 0.08);
+  background: rgba(255, 70, 90, 0.09);
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
@@ -1531,15 +1566,15 @@ html, body {
 }
 
 .shortcut-key-btn.recording {
-  background: rgba(124, 111, 247, 0.12);
-  border-color: rgba(124, 111, 247, 0.32);
+  background: rgba(255, 70, 90, 0.14);
+  border-color: rgba(255, 70, 90, 0.38);
   color: var(--accent);
   animation: recording-glow 1.5s ease-in-out infinite;
 }
 
 @keyframes recording-glow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 111, 247, 0); }
-  50% { box-shadow: 0 0 10px 1px rgba(124, 111, 247, 0.15); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 70, 90, 0); }
+  50% { box-shadow: 0 0 12px 1px rgba(255, 70, 90, 0.22); }
 }
 
 .shortcut-key-btn kbd {

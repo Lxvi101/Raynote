@@ -1,4 +1,4 @@
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,6 +53,35 @@ fn trash_dir() -> PathBuf {
         fs::create_dir_all(&dir).expect("Could not create trash directory");
     }
     dir
+}
+
+fn preview_cache_dir() -> PathBuf {
+    let base = dirs_next::cache_dir()
+        .or_else(|| dirs_next::home_dir().map(|h| h.join("Library").join("Caches")))
+        .expect("Could not find cache directory");
+    let dir = base.join("Raynote").join("preview-cache");
+    if !dir.exists() {
+        fs::create_dir_all(&dir).expect("Could not create preview cache directory");
+    }
+    dir
+}
+
+fn safe_cache_part(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn preview_cache_path(id: &str, content_hash: &str) -> PathBuf {
+    let id = safe_cache_part(id);
+    let content_hash = safe_cache_part(content_hash);
+    preview_cache_dir().join(format!("{}-{}.html", id, content_hash))
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -170,12 +199,7 @@ fn list_notes(state: State<'_, AppState>) -> Vec<NoteMeta> {
 fn list_notes_paginated(state: State<'_, AppState>, offset: usize, limit: usize) -> PaginatedNotes {
     let cache = state.notes_cache.read().unwrap();
     let total = cache.len();
-    let notes = cache
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .cloned()
-        .collect();
+    let notes = cache.iter().skip(offset).take(limit).cloned().collect();
     PaginatedNotes { notes, total }
 }
 
@@ -185,9 +209,7 @@ fn search_notes(state: State<'_, AppState>, query: String, limit: usize) -> Vec<
     let cache = state.notes_cache.read().unwrap();
     cache
         .iter()
-        .filter(|n| {
-            n.title.to_lowercase().contains(&q) || n.preview.to_lowercase().contains(&q)
-        })
+        .filter(|n| n.title.to_lowercase().contains(&q) || n.preview.to_lowercase().contains(&q))
         .take(limit)
         .cloned()
         .collect()
@@ -205,6 +227,36 @@ fn notes_loading(state: State<'_, AppState>) -> bool {
 fn read_note(id: String) -> String {
     let path = notes_dir().join(format!("{}.md", id));
     fs::read_to_string(path).unwrap_or_default()
+}
+
+#[tauri::command]
+fn read_preview_cache(id: String, content_hash: String) -> Option<String> {
+    let path = preview_cache_path(&id, &content_hash);
+    fs::read_to_string(path).ok()
+}
+
+#[tauri::command]
+fn write_preview_cache(id: String, content_hash: String, html: String) -> bool {
+    let path = preview_cache_path(&id, &content_hash);
+    fs::write(path, html).is_ok()
+}
+
+#[tauri::command]
+fn delete_preview_cache(id: String) -> bool {
+    let prefix = format!("{}-", safe_cache_part(&id));
+    let dir = preview_cache_dir();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with(&prefix) && name.ends_with(".html") {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+    true
 }
 
 #[tauri::command]
@@ -292,11 +344,7 @@ fn list_trash() -> Vec<NoteMeta> {
                     .trim_start_matches('#')
                     .trim()
                     .to_string();
-                let title = if title.is_empty() {
-                    id.clone()
-                } else {
-                    title
-                };
+                let title = if title.is_empty() { id.clone() } else { title };
                 let preview = content
                     .lines()
                     .skip(1)
@@ -360,7 +408,8 @@ fn set_dock_visible(visible: bool) {
     {
         use objc::{msg_send, sel, sel_impl};
         unsafe {
-            let app: *mut objc::runtime::Object = msg_send![objc::class!(NSApplication), sharedApplication];
+            let app: *mut objc::runtime::Object =
+                msg_send![objc::class!(NSApplication), sharedApplication];
             // 0 = NSApplicationActivationPolicyRegular (show in dock)
             // 1 = NSApplicationActivationPolicyAccessory (hide from dock)
             let policy: i64 = if visible { 0 } else { 1 };
@@ -417,7 +466,13 @@ fn copy_to_assets(source_path: String) -> Result<(String, String), String> {
         .to_string();
     let safe_name = original_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -485,7 +540,8 @@ fn apply_glass_effects(win: &WebviewWindow) {
     }
 
     #[cfg(target_os = "windows")]
-    window_vibrancy::apply_blur(win, Some((18, 18, 24, 125))).expect("Failed to apply Windows blur");
+    window_vibrancy::apply_blur(win, Some((18, 18, 24, 125)))
+        .expect("Failed to apply Windows blur");
 }
 
 #[tauri::command]
@@ -678,6 +734,9 @@ pub fn run() {
             notes_loading,
             search_notes,
             read_note,
+            read_preview_cache,
+            write_preview_cache,
+            delete_preview_cache,
             save_note,
             delete_note,
             restore_note,

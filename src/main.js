@@ -2,10 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
-import { marked } from "marked";
 import hljs from "highlight.js";
 import "highlight.js/styles/github-dark-dimmed.min.css";
-import katex from "katex";
 import "katex/dist/katex.min.css";
 import { editor, TextareaBackend } from "./editor-adapter.js";
 import { loadAssetImage } from "./asset-cache.js";
@@ -246,6 +244,7 @@ async function autoGenerateTitle(noteId, content) {
 
     // Persist to disk
     await invoke("save_note", { id: noteId, content: updatedContent });
+    deleteDiskCachedPreviewHtml(noteId);
 
     // If user is currently viewing this note, update the editor too
     if (state.currentId === noteId) {
@@ -286,6 +285,23 @@ function hideSplash() {
   if (!splash || splash.classList.contains("hidden")) return;
   splash.classList.add("hidden");
   setTimeout(() => splash.remove(), 300);
+}
+
+function showNotesLoadingState(message = "Loading iCloud notes...") {
+  titlebarTitle.textContent = "Loading notes...";
+  noteList.innerHTML = `
+    <li class="note-list-loading" aria-live="polite">
+      <span class="note-list-loading-spinner"></span>
+      <span>${escapeHtml(message)}</span>
+    </li>
+  `;
+  preview.innerHTML = `
+    <div class="preview-loading preview-loading-with-text" aria-live="polite">
+      <span>${escapeHtml(message)}</span>
+    </div>
+  `;
+  editorEl.classList.remove("visible");
+  preview.classList.add("visible");
 }
 
 /** Main window hides; sticky windows are destroyed so they do not respawn on global shortcuts. */
@@ -357,172 +373,6 @@ function escapeHtml(str) {
   div.textContent = str;
   return div.innerHTML;
 }
-
-// ─── LaTeX extension for marked ───
-const latexBlock = {
-  name: "latexBlock",
-  level: "block",
-  start(src) {
-    return src.match(/\$\$/)?.index;
-  },
-  tokenizer(src) {
-    const match = src.match(/^\$\$([\s\S]+?)\$\$/);
-    if (match) {
-      return { type: "latexBlock", raw: match[0], text: match[1].trim() };
-    }
-  },
-  renderer(token) {
-    try {
-      const html = katex.renderToString(token.text, {
-        displayMode: true,
-        throwOnError: false,
-        trust: true,
-      });
-      return `<div class="latex-widget">${html}</div>`;
-    } catch {
-      return `<div class="latex-widget latex-error">${escapeHtml(token.text)}</div>`;
-    }
-  },
-};
-
-const latexInline = {
-  name: "latexInline",
-  level: "inline",
-  start(src) {
-    return src.match(/\$/)?.index;
-  },
-  tokenizer(src) {
-    const match = src.match(/^\$([^\$\n]+?)\$/);
-    if (match) {
-      return { type: "latexInline", raw: match[0], text: match[1].trim() };
-    }
-  },
-  renderer(token) {
-    try {
-      return katex.renderToString(token.text, {
-        displayMode: false,
-        throwOnError: false,
-        trust: true,
-      });
-    } catch {
-      return `<code class="latex-error">${escapeHtml(token.text)}</code>`;
-    }
-  },
-};
-
-// ─── Custom image renderer (lazy asset loading + width + align) ───
-// Format: ![alt|50%|right](src) — pipe-separated, defaults to 100% center
-function parseImageAlt(raw) {
-  const parts = (raw || "").split("|").map((s) => s.trim());
-  const alt = parts[0];
-  let width = "100%";
-  let align = "center";
-  for (let i = 1; i < parts.length; i++) {
-    const p = parts[i];
-    if (/^\d+%$/.test(p)) width = p;
-    else if (/^(left|center|right)$/i.test(p)) align = p.toLowerCase();
-  }
-  return { alt, width, align };
-}
-
-function imageAlignStyle(width, align) {
-  const margin =
-    align === "left"
-      ? "0 auto 0 0"
-      : align === "right"
-        ? "0 0 0 auto"
-        : "0 auto";
-  return `width:${width};margin:${margin};display:block`;
-}
-
-const imageRenderer = {
-  image(token) {
-    const src = token.href || "";
-    const { alt, width, align } = parseImageAlt(token.text || "");
-    const style = imageAlignStyle(width, align);
-    if (src.startsWith("asset:")) {
-      const assetName = src.slice(6);
-      return `<div class="lazy-image" data-asset="${escapeHtml(assetName)}" style="${style}">
-        <div class="lazy-image-placeholder">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="1.5"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="1.5"/><path d="M3 16l5-5 4 4 3-3 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <span>${escapeHtml(alt) || escapeHtml(assetName)}</span>
-        </div>
-      </div>`;
-    }
-    const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
-    return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" style="${style}"${title} loading="lazy">`;
-  },
-};
-
-// ─── Custom link renderer (asset file links + external links) ───
-const assetLinkRenderer = {
-  link(token) {
-    const href = token.href || "";
-    if (href.startsWith("asset:")) {
-      const assetName = href.slice(6);
-      const ext = assetName.split(".").pop().toLowerCase();
-      let icon;
-      if (ext === "pdf") {
-        icon = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 1h6l4 4v9a2 2 0 01-2 2H4a2 2 0 01-2-2V3a2 2 0 012-2z" stroke="currentColor" stroke-width="1.3"/><path d="M10 1v4h4" stroke="currentColor" stroke-width="1.3"/></svg>`;
-      } else if (/^(mp4|mov|webm|avi|mkv)$/.test(ext)) {
-        icon = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="1" y="3" width="14" height="10" rx="2" stroke="currentColor" stroke-width="1.3"/><path d="M6.5 6.5l3.5 2-3.5 2v-4z" fill="currentColor"/></svg>`;
-      } else {
-        icon = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 1h6l4 4v9a2 2 0 01-2 2H4a2 2 0 01-2-2V3a2 2 0 012-2z" stroke="currentColor" stroke-width="1.3"/><path d="M10 1v4h4" stroke="currentColor" stroke-width="1.3"/></svg>`;
-      }
-      const text = escapeHtml(token.text || assetName);
-      return `<a class="asset-link" data-asset="${escapeHtml(assetName)}" href="#">${icon} ${text}</a>`;
-    }
-    // Render all other links with a data attribute so we can open them externally
-    const url = escapeHtml(href);
-    const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
-    const label = token.tokens
-      ? this.parser.parseInline(token.tokens)
-      : escapeHtml(token.text || href);
-    return `<a class="external-link" href="#" data-url="${url}"${title}>${label}</a>`;
-  },
-};
-
-// ─── Custom code block renderer (lazy highlighting) ───
-const codeRenderer = {
-  code(token) {
-    const lang = token.lang || "";
-    const displayLang = lang || "plain";
-    const escaped = escapeHtml(token.text).replace(/"/g, "&quot;");
-    // Render unhighlighted first; highlight lazily via IntersectionObserver
-    return `<div class="code-window" data-lang="${escapeHtml(lang)}" data-highlight="pending">
-      <div class="code-window-titlebar">
-        <div class="code-window-dots">
-          <span class="dot dot-red"></span>
-          <span class="dot dot-yellow" role="button" tabindex="0" title="Collapse"></span>
-          <span class="dot dot-green"></span>
-        </div>
-        <span class="code-window-lang">${escapeHtml(displayLang)}</span>
-        <button class="code-copy-btn" data-code="${escaped}" title="Copy code">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
-            <path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5" stroke="currentColor" stroke-width="1.3"/>
-          </svg>
-        </button>
-      </div>
-      <div class="code-window-body">
-        <pre><code class="hljs">${escapeHtml(token.text)}</code></pre>
-      </div>
-    </div>`;
-  },
-  codespan(token) {
-    return `<code class="inline-code" title="Click to copy">${escapeHtml(token.text)}</code>`;
-  },
-};
-
-// ─── Configure marked ───
-marked.use({ extensions: [latexBlock, latexInline] });
-marked.use({
-  renderer: { ...codeRenderer, ...imageRenderer, ...assetLinkRenderer },
-});
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-});
 
 // ─── Shortcuts system ───
 const defaultShortcuts = {
@@ -710,6 +560,51 @@ function getCachedPreviewHtml(noteId, content) {
 
 function invalidatePreviewCache(noteId) {
   previewCache.delete(noteId);
+  warmPreviewDone.delete(noteId);
+}
+
+async function hashContent(content) {
+  if (globalThis.crypto?.subtle) {
+    const bytes = new TextEncoder().encode(content);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return [...new Uint8Array(digest)]
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  // Non-cryptographic fallback for unusual WebView contexts without SubtleCrypto.
+  let h = 2166136261;
+  for (let i = 0; i < content.length; i++) {
+    h ^= content.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+async function getDiskCachedPreviewHtml(noteId, contentHash) {
+  try {
+    return await invoke("read_preview_cache", {
+      id: noteId,
+      contentHash,
+    });
+  } catch (err) {
+    console.warn("Failed to read preview cache:", err);
+    return null;
+  }
+}
+
+function writeDiskCachedPreviewHtml(noteId, contentHash, html) {
+  invoke("write_preview_cache", {
+    id: noteId,
+    contentHash,
+    html,
+  }).catch((err) => {
+    console.warn("Failed to write preview cache:", err);
+  });
+}
+
+function deleteDiskCachedPreviewHtml(noteId) {
+  invoke("delete_preview_cache", { id: noteId }).catch(() => {});
 }
 
 // ─── Note content cache ───
@@ -740,6 +635,189 @@ function getCachedContent(noteId) {
 
 function invalidateContentCache(noteId) {
   contentCache.delete(noteId);
+}
+
+// ─── Markdown render worker ───
+// `marked.parse()` can be expensive enough to freeze note switching. Keep it
+// off the UI thread on cache misses, and terminate stale work when the user
+// clicks through notes quickly.
+let markdownWorker = null;
+let warmMarkdownWorker = null;
+let activeMarkdownRender = null;
+let markdownJobId = 0;
+
+function cancelledMarkdownRenderError() {
+  const err = new Error("Markdown render cancelled");
+  err.name = "AbortError";
+  return err;
+}
+
+function isMarkdownRenderCancelled(err) {
+  return err && err.name === "AbortError";
+}
+
+function getMarkdownWorker() {
+  if (typeof Worker === "undefined") return null;
+  if (!markdownWorker) {
+    markdownWorker = new Worker(
+      new URL("./markdown-worker.js", import.meta.url),
+      { type: "module" },
+    );
+  }
+  return markdownWorker;
+}
+
+function getWarmMarkdownWorker() {
+  if (typeof Worker === "undefined") return null;
+  if (!warmMarkdownWorker) {
+    warmMarkdownWorker = new Worker(
+      new URL("./markdown-worker.js", import.meta.url),
+      { type: "module" },
+    );
+  }
+  return warmMarkdownWorker;
+}
+
+function cancelPendingMarkdownRender() {
+  if (!activeMarkdownRender) return;
+  const render = activeMarkdownRender;
+  activeMarkdownRender = null;
+  if (markdownWorker === render.worker) {
+    markdownWorker.terminate();
+    markdownWorker = null;
+  }
+  render.cancel();
+}
+
+function renderMarkdownAsync(content) {
+  cancelPendingMarkdownRender();
+
+  const worker = getMarkdownWorker();
+  if (!worker) {
+    return import("./markdown-preview.js").then(({ renderMarkdown }) =>
+      renderMarkdown(content),
+    );
+  }
+
+  const jobId = ++markdownJobId;
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      worker.removeEventListener("message", onMessage);
+      worker.removeEventListener("error", onError);
+      if (activeMarkdownRender?.jobId === jobId) {
+        activeMarkdownRender = null;
+      }
+    };
+
+    const fail = (err, resetWorker = false) => {
+      cleanup();
+      if (resetWorker && markdownWorker === worker) {
+        markdownWorker.terminate();
+        markdownWorker = null;
+      }
+      reject(err);
+    };
+
+    const onMessage = (event) => {
+      const data = event.data || {};
+      if (data.id !== jobId) return;
+      if (data.ok) {
+        cleanup();
+        resolve(data.html);
+      } else {
+        fail(new Error(data.error || "Markdown render failed"), true);
+      }
+    };
+
+    const onError = (event) => {
+      fail(new Error(event.message || "Markdown render worker failed"), true);
+    };
+
+    activeMarkdownRender = {
+      jobId,
+      worker,
+      cancel: () => {
+        cleanup();
+        reject(cancelledMarkdownRenderError());
+      },
+    };
+
+    worker.addEventListener("message", onMessage);
+    worker.addEventListener("error", onError);
+
+    try {
+      worker.postMessage({ id: jobId, content });
+    } catch (err) {
+      fail(err, true);
+    }
+  });
+}
+
+function renderMarkdownWarmAsync(content) {
+  const worker = getWarmMarkdownWorker();
+  if (!worker) {
+    return import("./markdown-preview.js").then(({ renderMarkdown }) =>
+      renderMarkdown(content),
+    );
+  }
+
+  const jobId = ++markdownJobId;
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      worker.removeEventListener("message", onMessage);
+      worker.removeEventListener("error", onError);
+    };
+
+    const fail = (err, resetWorker = false) => {
+      cleanup();
+      if (resetWorker && warmMarkdownWorker === worker) {
+        warmMarkdownWorker.terminate();
+        warmMarkdownWorker = null;
+      }
+      reject(err);
+    };
+
+    const onMessage = (event) => {
+      const data = event.data || {};
+      if (data.id !== jobId) return;
+      if (data.ok) {
+        cleanup();
+        resolve(data.html);
+      } else {
+        fail(new Error(data.error || "Markdown render failed"), true);
+      }
+    };
+
+    const onError = (event) => {
+      fail(new Error(event.message || "Markdown render worker failed"), true);
+    };
+
+    worker.addEventListener("message", onMessage);
+    worker.addEventListener("error", onError);
+
+    try {
+      worker.postMessage({ id: jobId, content });
+    } catch (err) {
+      fail(err, true);
+    }
+  });
+}
+
+function afterNextPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => setTimeout(resolve, 0));
+  });
+}
+
+function idleDelay(timeout = 800) {
+  if ("requestIdleCallback" in window) {
+    return new Promise((resolve) => {
+      window.requestIdleCallback(resolve, { timeout });
+    });
+  }
+  return new Promise((resolve) => setTimeout(resolve, Math.min(timeout, 250)));
 }
 
 // ─── DOM refs ───
@@ -1465,6 +1543,10 @@ async function init() {
     applyStickyTintById(stickyTintIdFromStorage(raw) || "mist");
   }
 
+  if (!isSticky) {
+    showNotesLoadingState();
+  }
+
   await loadNotesInitial();
 
   // Sidebar is now painted (and the background scan has finished) — drop the
@@ -1520,6 +1602,8 @@ async function loadNotesInitial() {
     await loadNotes();
     return;
   }
+
+  showNotesLoadingState("Loading iCloud notes...");
   await new Promise((resolve) => {
     let settled = false;
     let unlisten = null;
@@ -1540,7 +1624,11 @@ async function loadNotesInitial() {
     // Safety net: if the event fired before this listener attached (very
     // fast scan), the flag will still flip — poll it as a fallback.
     poll = setInterval(async () => {
-      if (!(await invoke("notes_loading"))) settle();
+      if (!(await invoke("notes_loading"))) {
+        settle();
+      } else {
+        showNotesLoadingState("Still loading iCloud notes...");
+      }
     }, 200);
   });
 }
@@ -1570,6 +1658,7 @@ async function loadNotes() {
   state.totalNotes = result.total;
   state.notesOffset = result.notes.length;
   renderNoteList();
+  scheduleWarmPreviewCache(state.notes);
 }
 
 async function loadMoreNotes() {
@@ -1590,6 +1679,7 @@ async function loadMoreNotes() {
       state.totalNotes = result.total;
       state.notesOffset += result.notes.length;
       renderNoteList();
+      scheduleWarmPreviewCache(result.notes);
     }
   } finally {
     state.loadingMore = false;
@@ -1611,59 +1701,79 @@ async function selectNote(id) {
   }
 
   const prevId = state.currentId;
+  const gen = ++renderGeneration;
+  cancelPendingMarkdownRender();
   state.currentId = id;
-  let content = getCachedContent(id);
-  if (content === null) {
-    content = await invoke("read_note", { id });
-    cacheContent(id, content);
-  }
-  editor.setText(content);
-
-  // Update sidebar immediately (before any heavy render work)
   updateNoteListActiveState(prevId, id);
   updateTitle();
+  preview.innerHTML = '<div class="preview-loading"></div>';
+  setModeRaw("preview");
+
+  let content = getCachedContent(id);
+  if (content === null) {
+    try {
+      content = await invoke("read_note", { id });
+    } catch (err) {
+      if (renderGeneration !== gen || state.currentId !== id) return;
+      console.error("Failed to read note:", err);
+      preview.innerHTML =
+        '<div class="empty-state">This note could not be loaded.</div>';
+      return;
+    }
+    cacheContent(id, content);
+  }
+
+  if (renderGeneration !== gen || state.currentId !== id) return;
+
+  editor.setText(content);
 
   // Empty note: show empty state instantly
   if (!content || content.trim() === "") {
     preview.innerHTML = '<div class="empty-state">Start writing...</div>';
-    setModeRaw("preview");
     return;
   }
 
   // Cache hit: instant render, no blocking
   const cachedHtml = getCachedPreviewHtml(id, content);
   if (cachedHtml) {
-    if (codeObserver) { codeObserver.disconnect(); codeObserver = null; }
-    preview.innerHTML = cachedHtml;
-    lazyHighlightCodeBlocks();
-    lazyLoadAssetImages();
-    setupTodoAttributes();
-    setModeRaw("preview");
+    applyPreviewHtml(cachedHtml);
     return;
   }
 
-  // Cache miss: show spinner, yield to let the sidebar paint, then parse
-  preview.innerHTML = '<div class="preview-loading"></div>';
-  setModeRaw("preview");
+  const contentHash = await hashContent(content);
+  if (renderGeneration !== gen || state.currentId !== id) return;
 
-  const gen = ++renderGeneration;
+  const diskCachedHtml = await getDiskCachedPreviewHtml(id, contentHash);
+  if (renderGeneration !== gen || state.currentId !== id) return;
+  if (diskCachedHtml) {
+    cachePreviewHtml(id, content, diskCachedHtml);
+    applyPreviewHtml(diskCachedHtml);
+    return;
+  }
 
   // Double-yield: rAF ensures the browser has scheduled a paint,
-  // then setTimeout(0) runs after that paint completes
-  await new Promise((resolve) => {
-    requestAnimationFrame(() => setTimeout(resolve, 0));
-  });
+  // then setTimeout(0) runs after that paint completes.
+  await afterNextPaint();
 
   // Guard: if user navigated away during the yield, abandon this render
-  if (renderGeneration !== gen) return;
+  if (renderGeneration !== gen || state.currentId !== id) return;
 
-  if (codeObserver) { codeObserver.disconnect(); codeObserver = null; }
-  const html = marked.parse(content);
-  preview.innerHTML = html;
+  let html;
+  try {
+    html = await renderMarkdownAsync(content);
+  } catch (err) {
+    if (isMarkdownRenderCancelled(err)) return;
+    console.error("Failed to render markdown:", err);
+    if (renderGeneration !== gen || state.currentId !== id) return;
+    preview.innerHTML =
+      '<div class="empty-state">This note could not be rendered.</div>';
+    return;
+  }
+
+  if (renderGeneration !== gen || state.currentId !== id) return;
   cachePreviewHtml(id, content, html);
-  lazyHighlightCodeBlocks();
-  lazyLoadAssetImages();
-  setupTodoAttributes();
+  writeDiskCachedPreviewHtml(id, contentHash, html);
+  applyPreviewHtml(html);
 }
 
 /** Swap the .active class in the sidebar without rebuilding the DOM. */
@@ -1681,6 +1791,7 @@ function updateNoteListActiveState(prevId, newId) {
 async function saveCurrentNote() {
   if (!state.currentId) return;
   invalidatePreviewCache(state.currentId);
+  deleteDiskCachedPreviewHtml(state.currentId);
   const content = editor.getText();
   cacheContent(state.currentId, content); // keep cache in sync with disk
   await invoke("save_note", { id: state.currentId, content });
@@ -1884,6 +1995,7 @@ async function deleteCurrentNote() {
   const id = state.currentId;
   invalidatePreviewCache(id);
   invalidateContentCache(id);
+  deleteDiskCachedPreviewHtml(id);
 
   await invoke("delete_note", { id });
 
@@ -1938,6 +2050,7 @@ async function redoDeleteNote() {
 
   invalidatePreviewCache(id);
   invalidateContentCache(id);
+  deleteDiskCachedPreviewHtml(id);
   await invoke("delete_note", { id });
   undoDeleteStack.push({ id, wasPinned });
 
@@ -2019,40 +2132,172 @@ function copyNoteMarkdown() {
 
 // ─── Render ───
 let codeObserver = null;
+let imageObserver = null;
 
-function renderPreview(content, noteId = null) {
-  if (!content || content.trim() === "") {
-    preview.innerHTML = '<div class="empty-state">Start writing...</div>';
-    return;
-  }
-  // Clean up previous observer
+function disconnectPreviewObservers() {
   if (codeObserver) {
     codeObserver.disconnect();
     codeObserver = null;
+  }
+  if (imageObserver) {
+    imageObserver.disconnect();
+    imageObserver = null;
+  }
+}
+
+function applyPreviewHtml(html) {
+  disconnectPreviewObservers();
+  preview.innerHTML = html;
+  // Only observers need setup here - click/change/keydown handlers use event
+  // delegation on the preview element (registered once at startup).
+  lazyHighlightCodeBlocks();
+  lazyLoadAssetImages();
+  setupTodoAttributes();
+}
+
+async function renderPreview(content, noteId = null) {
+  const gen = ++renderGeneration;
+  cancelPendingMarkdownRender();
+
+  if (!content || content.trim() === "") {
+    disconnectPreviewObservers();
+    preview.innerHTML = '<div class="empty-state">Start writing...</div>';
+    return;
   }
 
   // Check cache when a noteId is provided
   if (noteId) {
     const cachedHtml = getCachedPreviewHtml(noteId, content);
     if (cachedHtml) {
-      preview.innerHTML = cachedHtml;
-      lazyHighlightCodeBlocks();
-      lazyLoadAssetImages();
-      setupTodoAttributes();
+      applyPreviewHtml(cachedHtml);
       return;
     }
   }
 
-  const html = marked.parse(content);
-  preview.innerHTML = html;
+  const contentHash = noteId ? await hashContent(content) : null;
+  if (renderGeneration !== gen || (noteId && state.currentId !== noteId)) {
+    return;
+  }
+
+  if (noteId && contentHash) {
+    const diskCachedHtml = await getDiskCachedPreviewHtml(noteId, contentHash);
+    if (renderGeneration !== gen || state.currentId !== noteId) return;
+    if (diskCachedHtml) {
+      cachePreviewHtml(noteId, content, diskCachedHtml);
+      applyPreviewHtml(diskCachedHtml);
+      return;
+    }
+  }
+
+  preview.innerHTML = '<div class="preview-loading"></div>';
+  await afterNextPaint();
+  if (renderGeneration !== gen || (noteId && state.currentId !== noteId)) {
+    return;
+  }
+
+  let html;
+  try {
+    html = await renderMarkdownAsync(content);
+  } catch (err) {
+    if (isMarkdownRenderCancelled(err)) return;
+    console.error("Failed to render markdown:", err);
+    if (renderGeneration !== gen || (noteId && state.currentId !== noteId)) {
+      return;
+    }
+    preview.innerHTML =
+      '<div class="empty-state">This note could not be rendered.</div>';
+    return;
+  }
+
+  if (renderGeneration !== gen || (noteId && state.currentId !== noteId)) {
+    return;
+  }
   if (noteId) {
     cachePreviewHtml(noteId, content, html);
+    if (contentHash) {
+      writeDiskCachedPreviewHtml(noteId, contentHash, html);
+    }
   }
-  // Only observers need setup here – click/change/keydown handlers use event
-  // delegation on the preview element (registered once at startup).
-  lazyHighlightCodeBlocks();
-  lazyLoadAssetImages();
-  setupTodoAttributes();
+  applyPreviewHtml(html);
+}
+
+// ─── Background preview warming ───
+const WARM_PREVIEW_BATCH_MAX = 12;
+const warmPreviewQueued = new Set();
+const warmPreviewDone = new Set();
+let warmPreviewQueue = [];
+let warmPreviewRunning = false;
+
+function scheduleWarmPreviewCache(notes) {
+  if (!Array.isArray(notes) || notes.length === 0) return;
+  for (const note of notes.slice(0, WARM_PREVIEW_BATCH_MAX)) {
+    const id = note?.id;
+    if (!id || id === state.currentId || warmPreviewQueued.has(id)) continue;
+    warmPreviewQueued.add(id);
+    warmPreviewQueue.push(id);
+  }
+  if (!warmPreviewRunning) {
+    warmPreviewRunning = true;
+    runWarmPreviewQueue();
+  }
+}
+
+async function runWarmPreviewQueue() {
+  try {
+    while (warmPreviewQueue.length > 0) {
+      const id = warmPreviewQueue.shift();
+      warmPreviewQueued.delete(id);
+      if (!id || id === state.currentId || warmPreviewDone.has(id)) continue;
+
+      await idleDelay();
+      if (state.dirty || id === state.currentId) continue;
+
+      await warmPreviewForNote(id);
+    }
+  } finally {
+    warmPreviewRunning = false;
+    if (warmPreviewQueue.length > 0) {
+      warmPreviewRunning = true;
+      runWarmPreviewQueue();
+    }
+  }
+}
+
+async function warmPreviewForNote(id) {
+  let content = getCachedContent(id);
+  if (content === null) {
+    content = await invoke("read_note", { id }).catch(() => null);
+    if (content === null) return;
+    cacheContent(id, content);
+  }
+
+  if (!content || content.trim() === "") {
+    warmPreviewDone.add(id);
+    return;
+  }
+
+  if (getCachedPreviewHtml(id, content)) {
+    warmPreviewDone.add(id);
+    return;
+  }
+
+  const contentHash = await hashContent(content);
+  const diskCachedHtml = await getDiskCachedPreviewHtml(id, contentHash);
+  if (diskCachedHtml) {
+    cachePreviewHtml(id, content, diskCachedHtml);
+    warmPreviewDone.add(id);
+    return;
+  }
+
+  const html = await renderMarkdownWarmAsync(content).catch((err) => {
+    console.warn("Failed to warm preview cache:", err);
+    return null;
+  });
+  if (!html) return;
+
+  cachePreviewHtml(id, content, html);
+  writeDiskCachedPreviewHtml(id, contentHash, html);
+  warmPreviewDone.add(id);
 }
 
 function lazyHighlightCodeBlocks() {
@@ -2085,9 +2330,6 @@ function lazyHighlightCodeBlocks() {
 }
 
 // setupCodeCopyButtons – removed: handled by delegated click on preview
-
-// ─── Lazy asset image loading ───
-let imageObserver = null;
 
 function lazyLoadAssetImages() {
   const pending = preview.querySelectorAll(".lazy-image[data-asset]");
@@ -2166,6 +2408,7 @@ function saveTodoChange() {
   _todoSaveTimer = setTimeout(async () => {
     if (!state.currentId) return;
     invalidatePreviewCache(state.currentId);
+    deleteDiskCachedPreviewHtml(state.currentId);
     const content = editor.getText();
     await invoke("save_note", { id: state.currentId, content });
     state.dirty = false;
@@ -2346,6 +2589,7 @@ async function handleSearch(query) {
     state.totalNotes = result.total;
     state.notesOffset = result.notes.length;
     renderNoteList();
+    scheduleWarmPreviewCache(state.notes);
     return;
   }
   // Search on backend — returns up to 100 results
@@ -2354,6 +2598,7 @@ async function handleSearch(query) {
   state.totalNotes = results.length;
   state.notesOffset = results.length;
   renderNoteList();
+  scheduleWarmPreviewCache(results);
 }
 
 function showEmptyState() {
