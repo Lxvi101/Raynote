@@ -9,6 +9,112 @@ import { editor, TextareaBackend } from "./editor-adapter.js";
 import { loadAssetImage } from "./asset-cache.js";
 import "./style.css";
 
+// ─── Spaces ───
+// A space is one of up to MAX_SPACES workspaces, each backed by its own
+// folder on disk under Raynote/Spaces/<id>/. The user picks an emoji + name
+// per space. The active space is persisted in localStorage; sticky windows
+// override the active space via the `space` URL parameter.
+//
+// The default space (id "default") is created on first launch and holds any
+// notes that existed before the spaces feature was introduced. It can be
+// renamed and re-emoji'd, but never deleted — see delete_space in lib.rs.
+const STORAGE_SPACES = "raynote-spaces";
+const STORAGE_CURRENT_SPACE = "raynote-current-space";
+const STORAGE_SPACE_SWITCH_ANIM = "raynote-space-switch-animation";
+const SPACE_SWITCH_ANIM_MS = 120;
+const DEFAULT_SPACE_ID = "default";
+const MAX_SPACES = 4;
+const DEFAULT_SPACE_NAME = "Notes";
+const DEFAULT_SPACE_EMOJI = "📝";
+const NEW_SPACE_NAME_SUGGESTIONS = ["Personal", "Work", "Ideas", "Projects"];
+const NEW_SPACE_EMOJI_SUGGESTIONS = ["💼", "💡", "🎨", "🧪"];
+
+function sanitizeSpace(s) {
+  if (!s || typeof s !== "object") return null;
+  if (typeof s.id !== "string" || !s.id) return null;
+  const name = typeof s.name === "string" && s.name.trim() ? s.name : DEFAULT_SPACE_NAME;
+  const emoji = typeof s.emoji === "string" && s.emoji ? s.emoji : DEFAULT_SPACE_EMOJI;
+  return { id: s.id, name, emoji };
+}
+
+function getSpaces() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORAGE_SPACES) || "null");
+    if (Array.isArray(raw) && raw.length > 0) {
+      const list = raw.map(sanitizeSpace).filter(Boolean);
+      if (list.length > 0) {
+        // Always ensure the default space exists at index 0 — protects against
+        // settings-panel edits accidentally removing it.
+        if (!list.some((s) => s.id === DEFAULT_SPACE_ID)) {
+          list.unshift({
+            id: DEFAULT_SPACE_ID,
+            name: DEFAULT_SPACE_NAME,
+            emoji: DEFAULT_SPACE_EMOJI,
+          });
+        }
+        return list.slice(0, MAX_SPACES);
+      }
+    }
+  } catch {
+    /* fall through to default */
+  }
+  return [{ id: DEFAULT_SPACE_ID, name: DEFAULT_SPACE_NAME, emoji: DEFAULT_SPACE_EMOJI }];
+}
+
+function saveSpaces(spaces) {
+  const cleaned = spaces.map(sanitizeSpace).filter(Boolean).slice(0, MAX_SPACES);
+  if (!cleaned.some((s) => s.id === DEFAULT_SPACE_ID)) {
+    cleaned.unshift({
+      id: DEFAULT_SPACE_ID,
+      name: DEFAULT_SPACE_NAME,
+      emoji: DEFAULT_SPACE_EMOJI,
+    });
+  }
+  localStorage.setItem(STORAGE_SPACES, JSON.stringify(cleaned));
+}
+
+function getStoredCurrentSpaceId() {
+  const id = localStorage.getItem(STORAGE_CURRENT_SPACE);
+  const spaces = getSpaces();
+  if (id && spaces.some((s) => s.id === id)) return id;
+  return spaces[0].id;
+}
+
+function setStoredCurrentSpaceId(id) {
+  localStorage.setItem(STORAGE_CURRENT_SPACE, id);
+}
+
+function isSpaceSwitchAnimationEnabled() {
+  return localStorage.getItem(STORAGE_SPACE_SWITCH_ANIM) !== "0";
+}
+
+function applySpaceSwitchAnimationPref() {
+  const on =
+    isSpaceSwitchAnimationEnabled() &&
+    !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  document.documentElement.classList.toggle("space-switch-animate", on);
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function playSpaceSwitchAnimOut() {
+  if (!document.documentElement.classList.contains("space-switch-animate")) {
+    return wait(0);
+  }
+  document.documentElement.classList.add("space-switch-out");
+  document.documentElement.classList.remove("space-switch-in");
+  return wait(SPACE_SWITCH_ANIM_MS);
+}
+
+function playSpaceSwitchAnimIn() {
+  if (!document.documentElement.classList.contains("space-switch-animate")) {
+    return;
+  }
+  document.documentElement.classList.remove("space-switch-out");
+}
+
 // ─── Auto-title generation ───
 const AUTO_TITLE_PLACEHOLDER = "{{auto_generate}}";
 const STORAGE_AI_API_KEY = "raynote-ai-api-key";
@@ -196,7 +302,7 @@ const titleGenerationsInFlight = new Set();
  * Runs in the background — replaces the {{auto_generate}} placeholder
  * in the saved file and updates the sidebar / titlebar.
  */
-async function autoGenerateTitle(noteId, content) {
+async function autoGenerateTitle(noteId, content, noteSpaceId) {
   if (titleGenerationsInFlight.has(noteId)) return;
 
   const ai = getAISettings();
@@ -242,9 +348,15 @@ async function autoGenerateTitle(noteId, content) {
       `# ${title}`,
     );
 
-    // Persist to disk
-    await invoke("save_note", { id: noteId, content: updatedContent });
-    deleteDiskCachedPreviewHtml(noteId);
+    // Persist to disk. Use the space the note belongs to — not the active
+    // one — so a slow title request that returns after the user switched
+    // spaces still saves to the right folder.
+    await invoke("save_note", {
+      space: noteSpaceId,
+      id: noteId,
+      content: updatedContent,
+    });
+    deleteDiskCachedPreviewHtml(noteId, noteSpaceId);
 
     // If user is currently viewing this note, update the editor too
     if (state.currentId === noteId) {
@@ -271,6 +383,11 @@ async function autoGenerateTitle(noteId, content) {
 const urlParams = new URLSearchParams(window.location.search);
 const isSticky = urlParams.get("sticky") === "1";
 const stickyNoteId = urlParams.get("id");
+// Sticky windows are pinned to the space they were opened from. The main
+// window reads the active space from localStorage and writes it back when
+// the user switches.
+const stickySpaceId = urlParams.get("space") || DEFAULT_SPACE_ID;
+const initialSpaceId = isSticky ? stickySpaceId : getStoredCurrentSpaceId();
 if (isSticky) {
   document.documentElement.classList.add("sticky-mode");
 }
@@ -278,6 +395,7 @@ if (isSticky) {
 // Apply persisted edge-glow prefs as early as possible so the rim renders
 // in its configured state on first paint instead of flashing the default.
 applyGlowSettings();
+applySpaceSwitchAnimationPref();
 
 /** Fade out and remove the inline splash from index.html. Idempotent. */
 function hideSplash() {
@@ -302,6 +420,109 @@ function showNotesLoadingState(message = "Loading iCloud notes...") {
   `;
   editorEl.classList.remove("visible");
   preview.classList.add("visible");
+}
+
+/** Build (or return) the small red progress pill above the note list.
+ *
+ * The pill is what carries the "Loading 12 of 51 notes from iCloud…"
+ * message during the initial scan after a Mac restart, when iCloud has
+ * evicted file contents and downloads have to happen serially. We keep
+ * it alive across the whole scan so the user always sees the count
+ * moving — that's the "tell them what's going on" piece of the fix. */
+function ensureNotesLoadingBanner() {
+  let banner = document.getElementById("notes-loading-banner");
+  if (banner) return banner;
+  banner = document.createElement("div");
+  banner.id = "notes-loading-banner";
+  banner.className = "notes-loading-banner";
+  banner.setAttribute("aria-live", "polite");
+  banner.innerHTML = `
+    <span class="notes-loading-banner-spinner" aria-hidden="true"></span>
+    <span class="notes-loading-banner-text">Syncing with iCloud…</span>
+  `;
+  const sb = document.getElementById("sidebar");
+  const nl = document.getElementById("note-list");
+  if (sb && nl) {
+    sb.insertBefore(banner, nl);
+  }
+  return banner;
+}
+
+// Avoid flashing the banner on warm restarts where the mtime fast-path
+// finishes the scan in well under a second. We only mount the banner once
+// the scan has been running for this long.
+const BANNER_SHOW_AFTER_MS = 250;
+let scanStartTime = null;
+
+function updateNotesLoadingBanner(progress) {
+  if (scanStartTime === null) {
+    scanStartTime = performance.now();
+  }
+  if (performance.now() - scanStartTime < BANNER_SHOW_AFTER_MS) {
+    return;
+  }
+  const banner = ensureNotesLoadingBanner();
+  banner.classList.remove("hidden");
+  const text = banner.querySelector(".notes-loading-banner-text");
+  if (!text) return;
+  const done = progress && typeof progress.done === "number" ? progress.done : null;
+  const total = progress && typeof progress.total === "number" ? progress.total : null;
+  if (done !== null && total !== null && total > 0) {
+    text.textContent = `Loading ${done} of ${total} notes from iCloud…`;
+  } else {
+    text.textContent = "Syncing with iCloud…";
+  }
+}
+
+function hideNotesLoadingBanner() {
+  scanStartTime = null;
+  const banner = document.getElementById("notes-loading-banner");
+  if (!banner) return;
+  banner.classList.add("hidden");
+  // Match the CSS transition (220ms) before removing from the DOM so the
+  // fade-out plays. Idempotent on repeated calls.
+  setTimeout(() => banner.remove(), 240);
+}
+
+// Coalesce a burst of note-meta-loaded events into one rerender per frame.
+let pendingNoteListRender = false;
+function scheduleNoteListRender() {
+  if (pendingNoteListRender) return;
+  pendingNoteListRender = true;
+  requestAnimationFrame(() => {
+    pendingNoteListRender = false;
+    renderNoteList();
+  });
+}
+
+/** Splice a single NoteMeta delivered by the streaming scan into state.notes.
+ *
+ * The backend's scan emits one of these per file in directory order. We
+ * insert by `modified` descending so the sidebar reads correctly while it
+ * fills. state.totalNotes / state.notesOffset stay alone here — the final
+ * `notes-loaded` event triggers refreshNotesFromBackend, which re-syncs
+ * pagination from the now-authoritative backend cache. */
+function upsertNoteFromScan(meta) {
+  if (!meta || typeof meta.id !== "string") return;
+  if (state.searchQuery) return;
+  const idx = state.notes.findIndex((n) => n.id === meta.id);
+  if (idx >= 0) {
+    const prev = state.notes[idx];
+    state.notes[idx] = meta;
+    if (prev.modified !== meta.modified) {
+      state.notes.sort((a, b) => b.modified - a.modified);
+    }
+  } else {
+    let insertAt = state.notes.length;
+    for (let i = 0; i < state.notes.length; i++) {
+      if (state.notes[i].modified < meta.modified) {
+        insertAt = i;
+        break;
+      }
+    }
+    state.notes.splice(insertAt, 0, meta);
+  }
+  scheduleNoteListRender();
 }
 
 /** Main window hides; sticky windows are destroyed so they do not respawn on global shortcuts. */
@@ -372,6 +593,13 @@ function escapeHtml(str) {
   const div = document.createElement("div");
   div.textContent = str;
   return div.innerHTML;
+}
+
+const MAX_TITLE_LEN = 80;
+
+function truncateTitle(title) {
+  if (!title || title.length <= MAX_TITLE_LEN) return title;
+  return `${title.slice(0, MAX_TITLE_LEN)}…`;
 }
 
 // ─── Shortcuts system ───
@@ -484,18 +712,42 @@ function matchesShortcut(e, sc) {
 const PAGE_SIZE = 50;
 
 // ─── Pinned notes ───
-function loadPinnedNotes() {
-  try {
-    return new Set(
-      JSON.parse(localStorage.getItem("raynote-pinned-notes") || "[]"),
-    );
-  } catch {
-    return new Set();
-  }
+// Pins are per-space; the legacy "raynote-pinned-notes" key (single-list,
+// from before the spaces feature) is migrated into the default space's key
+// on first read so existing pins are preserved.
+function pinnedNotesStorageKey(spaceId) {
+  return `raynote-pinned-notes-${spaceId}`;
 }
 
-function savePinnedNotes(pinnedSet) {
-  localStorage.setItem("raynote-pinned-notes", JSON.stringify([...pinnedSet]));
+function loadPinnedNotes(spaceId) {
+  const key = pinnedNotesStorageKey(spaceId);
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw !== null) return new Set(JSON.parse(raw));
+  } catch {
+    /* fall through to legacy migration */
+  }
+  if (spaceId === DEFAULT_SPACE_ID) {
+    try {
+      const legacy = localStorage.getItem("raynote-pinned-notes");
+      if (legacy) {
+        const ids = JSON.parse(legacy);
+        localStorage.setItem(key, JSON.stringify(ids));
+        localStorage.removeItem("raynote-pinned-notes");
+        return new Set(ids);
+      }
+    } catch {
+      /* nothing */
+    }
+  }
+  return new Set();
+}
+
+function savePinnedNotes(pinnedSet, spaceId) {
+  localStorage.setItem(
+    pinnedNotesStorageKey(spaceId),
+    JSON.stringify([...pinnedSet]),
+  );
 }
 
 function toggleNotePin(id) {
@@ -504,7 +756,7 @@ function toggleNotePin(id) {
   } else {
     state.pinnedNotes.add(id);
   }
-  savePinnedNotes(state.pinnedNotes);
+  savePinnedNotes(state.pinnedNotes, state.currentSpaceId);
   renderNoteList(state.searchQuery);
 }
 
@@ -519,7 +771,8 @@ const state = {
   notesOffset: 0,
   loadingMore: false,
   searchQuery: "",
-  pinnedNotes: loadPinnedNotes(),
+  currentSpaceId: initialSpaceId,
+  pinnedNotes: loadPinnedNotes(initialSpaceId),
   currentId: null,
   mode: "preview", // 'preview' | 'edit' | 'live'
   sidebarOpen: true,
@@ -584,6 +837,7 @@ async function hashContent(content) {
 async function getDiskCachedPreviewHtml(noteId, contentHash) {
   try {
     return await invoke("read_preview_cache", {
+      space: state.currentSpaceId,
       id: noteId,
       contentHash,
     });
@@ -595,6 +849,7 @@ async function getDiskCachedPreviewHtml(noteId, contentHash) {
 
 function writeDiskCachedPreviewHtml(noteId, contentHash, html) {
   invoke("write_preview_cache", {
+    space: state.currentSpaceId,
     id: noteId,
     contentHash,
     html,
@@ -603,8 +858,14 @@ function writeDiskCachedPreviewHtml(noteId, contentHash, html) {
   });
 }
 
-function deleteDiskCachedPreviewHtml(noteId) {
-  invoke("delete_preview_cache", { id: noteId }).catch(() => {});
+function deleteDiskCachedPreviewHtml(noteId, spaceOverride) {
+  // Callers that have a stale spaceOverride (e.g. a slow auto-title request
+  // returning after the user switched spaces) must pass it explicitly so we
+  // wipe the right space's cache rather than the currently-active one's.
+  invoke("delete_preview_cache", {
+    space: spaceOverride || state.currentSpaceId,
+    id: noteId,
+  }).catch(() => {});
 }
 
 // ─── Note content cache ───
@@ -631,6 +892,10 @@ function getCachedContent(noteId) {
   contentCache.delete(noteId);
   contentCache.set(noteId, content); // bump to MRU
   return content;
+}
+
+function hasCachedContent(noteId) {
+  return contentCache.has(noteId);
 }
 
 function invalidateContentCache(noteId) {
@@ -983,6 +1248,10 @@ function createSettingsPanel() {
             <span class="settings-nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>
             <span>General</span>
           </button>
+          <button class="settings-nav-item" data-cat="spaces">
+            <span class="settings-nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="1.6" y="1.6" width="5.6" height="5.6" rx="1.3" stroke="currentColor" stroke-width="1.3"/><rect x="8.8" y="1.6" width="5.6" height="5.6" rx="1.3" stroke="currentColor" stroke-width="1.3"/><rect x="1.6" y="8.8" width="5.6" height="5.6" rx="1.3" stroke="currentColor" stroke-width="1.3"/><rect x="8.8" y="8.8" width="5.6" height="5.6" rx="1.3" stroke="currentColor" stroke-width="1.3"/></svg></span>
+            <span>Spaces</span>
+          </button>
           <button class="settings-nav-item" data-cat="appearance">
             <span class="settings-nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.4" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.6V14.4A6.4 6.4 0 0 0 8 1.6Z" fill="currentColor"/></svg></span>
             <span>Appearance</span>
@@ -1024,6 +1293,36 @@ function createSettingsPanel() {
                 </div>
               </div>
               <div class="settings-group-caption"><strong>Auto-generate</strong> lets the AI write a title from your content (configure the provider in the AI tab). <strong>Write manually</strong> starts the cursor right after <code>#&nbsp;</code>. <strong>Skip</strong> creates an empty note with the cursor at the top.</div>
+            </div>
+          </div>
+
+          <div class="settings-cat hidden" data-cat="spaces">
+            <h2 class="settings-cat-title">Spaces</h2>
+            <div class="settings-group">
+              <div class="settings-group-title">Your Spaces</div>
+              <div class="settings-card" id="spaces-card">
+                <div id="spaces-list"></div>
+              </div>
+              <div class="settings-group-caption">Each space is its own folder of notes, trash, and pinned items. Switch between them with <code>⌘1</code>–<code>⌘4</code>. Up to ${MAX_SPACES} spaces.</div>
+              <button type="button" class="space-add-btn" id="add-space-btn">
+                <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <span>Add space</span>
+              </button>
+            </div>
+            <div class="settings-group">
+              <div class="settings-group-title">Switcher</div>
+              <div class="settings-card">
+                <div class="settings-item">
+                  <div class="setting-info">
+                    <span class="setting-label">Animate switches</span>
+                    <span class="setting-desc">Fade the note list and editor when changing spaces</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="toggle-space-switch-anim" />
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1266,6 +1565,17 @@ function createSettingsPanel() {
     aiKeyInput.type = isPassword ? "text" : "password";
   });
 
+  // Add space (Spaces tab)
+  panel.querySelector("#add-space-btn")?.addEventListener("click", addNewSpace);
+
+  panel.querySelector("#toggle-space-switch-anim")?.addEventListener("change", (e) => {
+    localStorage.setItem(
+      STORAGE_SPACE_SWITCH_ANIM,
+      e.target.checked ? "1" : "0",
+    );
+    applySpaceSwitchAnimationPref();
+  });
+
   return panel;
 }
 
@@ -1298,6 +1608,149 @@ function openSettings() {
     ai.baseUrl === DEFAULT_AI_BASE_URL ? "" : ai.baseUrl;
   renderShortcutsList();
   renderGlobalShortcutsList();
+  renderSpacesSettingsList();
+  document.getElementById("toggle-space-switch-anim").checked =
+    isSpaceSwitchAnimationEnabled();
+}
+
+// ─── Spaces settings ───
+// In-settings management of the spaces list. The sidebar switcher updates
+// reactively as soon as the user edits a name, picks a new emoji, adds a
+// space, or deletes one (see calls to renderSpaceSwitcher below).
+function renderSpacesSettingsList() {
+  const list = document.getElementById("spaces-list");
+  if (!list) return;
+  const spaces = getSpaces();
+  list.innerHTML = spaces
+    .map(
+      (s, i) => `
+      <div class="space-row" data-space="${escapeHtml(s.id)}">
+        <button type="button"
+                class="space-row-emoji"
+                data-action="cycle-emoji"
+                title="Click to change emoji">${escapeHtml(s.emoji || DEFAULT_SPACE_EMOJI)}</button>
+        <input type="text"
+               class="space-row-name setting-input"
+               data-field="name"
+               value="${escapeHtml(s.name)}"
+               maxlength="32"
+               placeholder="Space name" />
+        <kbd class="space-row-shortcut">⌘${i + 1}</kbd>
+        ${
+          s.id === DEFAULT_SPACE_ID
+            ? `<span class="space-row-default" title="The default space can be renamed but not deleted">Default</span>`
+            : `<button type="button" class="space-row-delete" data-action="delete" title="Delete space">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 4.5h10M5.5 4.5V3a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.5M4 4.5l.7 8.6A1.3 1.3 0 0 0 6 14.3h4a1.3 1.3 0 0 0 1.3-1.2L12 4.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>`
+        }
+      </div>
+    `,
+    )
+    .join("");
+
+  list.querySelectorAll(".space-row").forEach((row) => {
+    const id = row.dataset.space;
+    const nameInput = row.querySelector('[data-field="name"]');
+    if (nameInput) {
+      // Save on Enter or blur — not on every keystroke (avoids stomping
+      // the cursor with a re-render mid-typing).
+      const commit = () => {
+        const next = nameInput.value.trim() || DEFAULT_SPACE_NAME;
+        const cur = getSpaces();
+        const idx = cur.findIndex((s) => s.id === id);
+        if (idx < 0) return;
+        if (cur[idx].name === next) return;
+        cur[idx].name = next;
+        saveSpaces(cur);
+        renderSpaceSwitcher();
+      };
+      nameInput.addEventListener("blur", commit);
+      nameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          nameInput.blur();
+        }
+      });
+    }
+
+    row.querySelector('[data-action="cycle-emoji"]')?.addEventListener(
+      "click",
+      () => {
+        // Simple inline cycle — full emoji picker is overkill for 4 spaces.
+        const PALETTE = [
+          "📝", "💼", "💡", "🎨", "🧪", "📚", "🎯", "🌱",
+          "🚀", "🔥", "🪐", "🧠", "🎵", "💭", "📦", "🏠",
+        ];
+        const cur = getSpaces();
+        const idx = cur.findIndex((s) => s.id === id);
+        if (idx < 0) return;
+        const currentEmoji = cur[idx].emoji || DEFAULT_SPACE_EMOJI;
+        const pIdx = PALETTE.indexOf(currentEmoji);
+        cur[idx].emoji = PALETTE[(pIdx + 1) % PALETTE.length];
+        saveSpaces(cur);
+        renderSpacesSettingsList();
+        renderSpaceSwitcher();
+      },
+    );
+
+    row.querySelector('[data-action="delete"]')?.addEventListener(
+      "click",
+      async (e) => {
+        e.stopPropagation();
+        const target = getSpaces().find((s) => s.id === id);
+        if (!target) return;
+        const ok = await showConfirmDialog({
+          title: "Delete space?",
+          message: `Delete the "${target.name}" space and all of its notes? This cannot be undone.`,
+          confirmLabel: "Delete",
+          destructive: true,
+        });
+        if (!ok) return;
+        // If the user deletes the active space, hop back to default
+        // *before* removing the folder so the new sidebar can load.
+        if (state.currentSpaceId === id) {
+          await switchToSpace(DEFAULT_SPACE_ID);
+          if (state.currentSpaceId === id) return;
+        }
+        try {
+          await invoke("delete_space", { space: id });
+        } catch (err) {
+          showCopyToast(`Could not delete: ${err}`);
+          renderSpacesSettingsList();
+          return;
+        }
+        const remaining = getSpaces().filter((s) => s.id !== id);
+        saveSpaces(remaining);
+        localStorage.removeItem(`raynote-pinned-notes-${id}`);
+        localStorage.removeItem(`raynote-last-note-${id}`);
+        renderSpacesSettingsList();
+        renderSpaceSwitcher();
+        showCopyToast("Space deleted");
+      },
+    );
+  });
+
+  // Add-space button enable/disable state.
+  const addBtn = document.getElementById("add-space-btn");
+  if (addBtn) {
+    addBtn.disabled = spaces.length >= MAX_SPACES;
+    addBtn.classList.toggle("disabled", spaces.length >= MAX_SPACES);
+  }
+}
+
+function addNewSpace() {
+  const spaces = getSpaces();
+  if (spaces.length >= MAX_SPACES) return;
+  const idx = spaces.length;
+  const id = `s${Date.now()}`;
+  const name =
+    NEW_SPACE_NAME_SUGGESTIONS[idx] || `Space ${idx + 1}`;
+  const emoji =
+    NEW_SPACE_EMOJI_SUGGESTIONS[idx - 1] || DEFAULT_SPACE_EMOJI;
+  spaces.push({ id, name, emoji });
+  saveSpaces(spaces);
+  renderSpacesSettingsList();
+  renderSpaceSwitcher();
 }
 
 function closeSettings() {
@@ -1545,13 +1998,27 @@ async function init() {
 
   if (!isSticky) {
     showNotesLoadingState();
+    renderSpaceSwitcher();
+  }
+
+  setupEventListeners();
+  setupTauriListeners();
+
+  // For the main window, dismiss the splash as soon as the listeners are
+  // attached. The streaming note-meta-loaded events fill the sidebar in
+  // real time and the red progress banner above the list narrates the
+  // download — staring at a frozen splash for ~3 min on a cold-iCloud
+  // boot was the original bug. Sticky windows keep the original "splash
+  // until the specific note is ready" flow.
+  if (!isSticky) {
+    hideSplash();
   }
 
   await loadNotesInitial();
 
-  // Sidebar is now painted (and the background scan has finished) — drop the
-  // splash before we start fetching/rendering the first note. Markdown render
-  // uses the existing .preview-loading spinner.
+  // Sticky-window splash dismissal still happens here, after its single
+  // note is fetched. For the main window this is a no-op (hideSplash is
+  // idempotent).
   hideSplash();
 
   if (isSticky) {
@@ -1564,7 +2031,10 @@ async function init() {
       return;
     }
     // Check if note exists by trying to read it (may not be in paginated list)
-    const stickyContent = await invoke("read_note", { id: stickyNoteId });
+    const stickyContent = await invoke("read_note", {
+      space: state.currentSpaceId,
+      id: stickyNoteId,
+    });
     if (!stickyContent) {
       preview.innerHTML =
         '<div class="empty-state">This sticky could not be found.</div>';
@@ -1579,8 +2049,12 @@ async function init() {
     const target = getPreferredEditor() === "live" ? "live" : "edit";
     await setMode(target);
     editor.focus();
-  } else if (state.notes.length > 0) {
-    await selectNote(state.notes[0].id);
+  } else if (state.notes.length > 0 && !state.currentId) {
+    // Restore the last-selected note for this space if it still exists.
+    const lastId = recallLastNote(state.currentSpaceId);
+    const target =
+      (lastId && state.notes.find((n) => n.id === lastId)) || state.notes[0];
+    await selectNote(target.id);
   } else {
     showEmptyState();
   }
@@ -1589,17 +2063,23 @@ async function init() {
   setupTauriListeners();
 }
 
-// First load on the main window. The note-metadata scan now runs in the
-// background (see the Rust setup hook), so an empty result here can mean
-// "scan not finished yet" rather than "no notes". Keep waiting — and let the
-// caller keep the splash up — until the scan actually completes, instead of
-// flashing an empty state.
+// First load on the main window. The backend seeds from a local metadata cache
+// and refreshes from iCloud in the background, so non-empty results can be used
+// immediately. Empty results still wait for the scan to distinguish "no notes"
+// from "iCloud not ready yet".
 async function loadNotesInitial() {
-  await loadNotes();
+  // If we're booting into a non-default space, the backend hasn't scanned
+  // it yet (boot only scans default). Kick off the scan first so the
+  // streaming events arrive while we render the cached metadata.
+  if (!isSticky && state.currentSpaceId !== DEFAULT_SPACE_ID) {
+    invoke("scan_space", { space: state.currentSpaceId }).catch(() => {});
+  }
+
+  await loadNotes({ warmPreviews: false });
   if (state.notes.length > 0 || isSticky) return;
-  if (!(await invoke("notes_loading"))) {
+  if (!(await invoke("notes_loading", { space: state.currentSpaceId }))) {
     // Scan finished between the two calls above — pick up its results.
-    await loadNotes();
+    await loadNotes({ warmPreviews: false });
     return;
   }
 
@@ -1613,18 +2093,21 @@ async function loadNotesInitial() {
       settled = true;
       if (poll) clearInterval(poll);
       if (unlisten) unlisten();
-      await loadNotes();
+      await refreshNotesFromBackend({ selectIfNone: false });
       resolve();
     };
     // Normal path: the backend emits this once the scan completes.
-    listen("notes-loaded", settle).then((fn) => {
+    // notes-loaded is per-space — only settle for our current space.
+    listen("notes-loaded", (event) => {
+      if (event?.payload?.space === state.currentSpaceId) settle();
+    }).then((fn) => {
       unlisten = fn;
       if (settled) fn();
     });
     // Safety net: if the event fired before this listener attached (very
     // fast scan), the flag will still flip — poll it as a fallback.
     poll = setInterval(async () => {
-      if (!(await invoke("notes_loading"))) {
+      if (!(await invoke("notes_loading", { space: state.currentSpaceId }))) {
         settle();
       } else {
         showNotesLoadingState("Still loading iCloud notes...");
@@ -1634,13 +2117,18 @@ async function loadNotesInitial() {
 }
 
 // ─── Notes CRUD ───
-async function loadNotes() {
+async function loadNotes({ warmPreviews = true } = {}) {
+  const space = state.currentSpaceId;
   state.searchQuery = "";
   search.value = "";
   const result = await invoke("list_notes_paginated", {
+    space,
     offset: 0,
     limit: PAGE_SIZE,
   });
+  // Stale guard: if the user switched spaces while this was in flight,
+  // discard the result so we don't display notes from the wrong space.
+  if (state.currentSpaceId !== space) return;
 
   // Ensure pinned notes are always loaded even if not in the first page
   const loadedIds = new Set(result.notes.map((n) => n.id));
@@ -1650,7 +2138,8 @@ async function loadNotes() {
   let pinnedExtras = [];
   if (missingPinned.length > 0) {
     // Fetch all notes to find the missing pinned ones (they could be old)
-    const all = await invoke("list_notes");
+    const all = await invoke("list_notes", { space });
+    if (state.currentSpaceId !== space) return;
     pinnedExtras = all.filter((n) => missingPinned.includes(n.id));
   }
 
@@ -1658,7 +2147,201 @@ async function loadNotes() {
   state.totalNotes = result.total;
   state.notesOffset = result.notes.length;
   renderNoteList();
-  scheduleWarmPreviewCache(state.notes);
+  if (warmPreviews) {
+    scheduleWarmPreviewCache(state.notes);
+  }
+}
+
+let notesRefreshPromise = null;
+
+function refreshNotesFromBackend({ selectIfNone = false } = {}) {
+  if (notesRefreshPromise) return notesRefreshPromise;
+  notesRefreshPromise = (async () => {
+    await loadNotes({ warmPreviews: false });
+
+    if (state.currentId) {
+      const currentStillExists = state.notes.some((n) => n.id === state.currentId);
+      if (currentStillExists) {
+        updateTitle();
+        return;
+      }
+      state.currentId = null;
+    }
+
+    if (selectIfNone && state.notes.length > 0) {
+      await selectNote(state.notes[0].id);
+    } else if (state.notes.length === 0) {
+      showEmptyState();
+    }
+  })().finally(() => {
+    notesRefreshPromise = null;
+  });
+  return notesRefreshPromise;
+}
+
+// ─── Spaces switching ───
+// Per-space last-selected note. Restoring on switch keeps each space's
+// session feeling like its own window — typing in Work then jumping to
+// Personal and back leaves you exactly where you were.
+function lastNoteStorageKey(spaceId) {
+  return `raynote-last-note-${spaceId}`;
+}
+
+function rememberLastNote(spaceId, noteId) {
+  if (!spaceId || !noteId) return;
+  localStorage.setItem(lastNoteStorageKey(spaceId), noteId);
+}
+
+function recallLastNote(spaceId) {
+  return localStorage.getItem(lastNoteStorageKey(spaceId));
+}
+
+let spaceSwitchInFlight = false;
+
+async function switchToSpace(spaceId) {
+  if (isSticky) return;
+  if (!spaceId || spaceId === state.currentSpaceId) return;
+  if (spaceSwitchInFlight) return;
+  const spaces = getSpaces();
+  if (!spaces.some((s) => s.id === spaceId)) return;
+
+  spaceSwitchInFlight = true;
+  try {
+    // Overlap fade-out with the invisible prep work (save, cache clear)
+    // so the user only perceives whichever takes longer, not the sum.
+    const fadeOut = playSpaceSwitchAnimOut();
+
+    if (_saveTimeout) {
+      clearTimeout(_saveTimeout);
+      _saveTimeout = null;
+    }
+    if (state.dirty && state.currentId) {
+      await saveCurrentNote();
+    }
+    cancelPendingMarkdownRender();
+
+    if (state.currentId) {
+      rememberLastNote(state.currentSpaceId, state.currentId);
+    }
+
+    previewCache.clear();
+    contentCache.clear();
+    warmPreviewQueued.clear();
+    warmPreviewDone.clear();
+    warmPreviewQueue.length = 0;
+
+    // Wait for the fade to finish before swapping visible content.
+    await fadeOut;
+
+    // Reset sidebar + selection state.
+    state.notes = [];
+    state.totalNotes = 0;
+    state.notesOffset = 0;
+    state.currentId = null;
+    state.dirty = false;
+    state.searchQuery = "";
+    search.value = "";
+    hideNotesLoadingBanner();
+
+    renderGeneration++;
+    preview.innerHTML = '<div class="preview-loading"></div>';
+
+    state.currentSpaceId = spaceId;
+    setStoredCurrentSpaceId(spaceId);
+    state.pinnedNotes = loadPinnedNotes(spaceId);
+    renderSpaceSwitcher();
+    updateTitle();
+
+    invoke("scan_space", { space: spaceId }).catch(() => {});
+    await loadNotes();
+
+    const lastId = recallLastNote(spaceId);
+    const target =
+      (lastId && state.notes.find((n) => n.id === lastId)) ||
+      state.notes[0] ||
+      null;
+    if (target) {
+      await selectNote(target.id);
+    } else {
+      showEmptyState();
+    }
+
+    // Content is ready — reveal it. CSS transition handles the rest.
+    playSpaceSwitchAnimIn();
+  } finally {
+    document.documentElement.classList.remove("space-switch-out", "space-switch-in");
+    spaceSwitchInFlight = false;
+  }
+}
+
+function getSpaceSwitcherEl() {
+  let el = document.getElementById("space-switcher");
+  if (el || isSticky) return el;
+  const sb = document.getElementById("sidebar");
+  if (!sb) return null;
+  el = document.createElement("div");
+  el.id = "space-switcher";
+  el.className = "space-switcher";
+  // Single delegated click handler — buttons get rebuilt on every render.
+  el.addEventListener("click", (e) => {
+    const btn = e.target.closest(".space-btn");
+    if (!btn) return;
+    const id = btn.dataset.space;
+    if (id) switchToSpace(id);
+  });
+  sb.appendChild(el);
+  return el;
+}
+
+function positionSpaceSwitcherIndicator() {
+  const scroll = document.querySelector(".space-switcher-scroll");
+  if (!scroll) return;
+  const indicator = scroll.querySelector(".space-switcher-indicator");
+  const active = scroll.querySelector(".space-btn.active");
+  if (!indicator) return;
+  if (!active) {
+    indicator.style.opacity = "0";
+    return;
+  }
+  indicator.style.width = `${active.offsetWidth}px`;
+  indicator.style.height = `${active.offsetHeight}px`;
+  indicator.style.transform = `translate(${active.offsetLeft}px, ${active.offsetTop}px)`;
+  indicator.style.opacity = "1";
+}
+
+function renderSpaceSwitcher() {
+  if (isSticky) return;
+  const el = getSpaceSwitcherEl();
+  if (!el) return;
+  const spaces = getSpaces();
+  // Single-space mode: hide entirely (see the user's brief — the switcher
+  // only appears once a second space exists).
+  if (spaces.length <= 1) {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  el.classList.remove("hidden");
+  el.innerHTML = `
+    <div class="space-switcher-scroll">
+      <div class="space-switcher-indicator" aria-hidden="true"></div>
+      ${spaces
+        .map((s, i) => {
+          const isActive = s.id === state.currentSpaceId;
+          return `
+        <button type="button"
+                class="space-btn${isActive ? " active" : ""}"
+                data-space="${escapeHtml(s.id)}"
+                title="${escapeHtml(s.name)} (⌘${i + 1})"
+                aria-label="${escapeHtml(s.name)}"
+                aria-current="${isActive ? "page" : "false"}">
+          <span class="space-emoji" aria-hidden="true">${escapeHtml(s.emoji || DEFAULT_SPACE_EMOJI)}</span>
+        </button>`;
+        })
+        .join("")}
+    </div>
+  `;
+  requestAnimationFrame(positionSpaceSwitcherIndicator);
 }
 
 async function loadMoreNotes() {
@@ -1669,11 +2352,14 @@ async function loadMoreNotes() {
   )
     return;
   state.loadingMore = true;
+  const space = state.currentSpaceId;
   try {
     const result = await invoke("list_notes_paginated", {
+      space,
       offset: state.notesOffset,
       limit: PAGE_SIZE,
     });
+    if (state.currentSpaceId !== space) return;
     if (result.notes.length > 0) {
       state.notes = [...state.notes, ...result.notes];
       state.totalNotes = result.total;
@@ -1695,8 +2381,9 @@ async function selectNote(id) {
   if (state.currentId) {
     const prevContent = editor.getText();
     const prevNoteId = state.currentId;
+    const prevSpaceId = state.currentSpaceId;
     if (hasAutoTitlePlaceholder(prevContent)) {
-      autoGenerateTitle(prevNoteId, prevContent); // fire-and-forget
+      autoGenerateTitle(prevNoteId, prevContent, prevSpaceId); // fire-and-forget
     }
   }
 
@@ -1704,6 +2391,7 @@ async function selectNote(id) {
   const gen = ++renderGeneration;
   cancelPendingMarkdownRender();
   state.currentId = id;
+  if (!isSticky) rememberLastNote(state.currentSpaceId, id);
   updateNoteListActiveState(prevId, id);
   updateTitle();
   preview.innerHTML = '<div class="preview-loading"></div>';
@@ -1712,7 +2400,7 @@ async function selectNote(id) {
   let content = getCachedContent(id);
   if (content === null) {
     try {
-      content = await invoke("read_note", { id });
+      content = await invoke("read_note", { space: state.currentSpaceId, id });
     } catch (err) {
       if (renderGeneration !== gen || state.currentId !== id) return;
       console.error("Failed to read note:", err);
@@ -1794,12 +2482,18 @@ async function saveCurrentNote() {
   deleteDiskCachedPreviewHtml(state.currentId);
   const content = editor.getText();
   cacheContent(state.currentId, content); // keep cache in sync with disk
-  await invoke("save_note", { id: state.currentId, content });
+  await invoke("save_note", {
+    space: state.currentSpaceId,
+    id: state.currentId,
+    content,
+  });
   state.dirty = false;
   const rawTitle =
     (content.split("\n")[0] || state.currentId).replace(/^#+\s*/, "").trim() ||
     state.currentId;
-  const title = rawTitle === AUTO_TITLE_PLACEHOLDER ? "New Note" : rawTitle;
+  const title = truncateTitle(
+    rawTitle === AUTO_TITLE_PLACEHOLDER ? "New Note" : rawTitle,
+  );
   const previewText = content.split("\n").slice(1, 3).join(" ").slice(0, 100);
   const now = Math.floor(Date.now() / 1000);
   const idx = state.notes.findIndex((n) => n.id === state.currentId);
@@ -1815,6 +2509,7 @@ async function saveCurrentNote() {
   // Insert at top (most recently modified)
   state.notes.unshift(updatedMeta);
   renderNoteList(state.searchQuery);
+  updateTitle();
 }
 
 async function createNote() {
@@ -1839,7 +2534,7 @@ async function createNote() {
     cursorPos = content.length;
   }
 
-  await invoke("save_note", { id, content });
+  await invoke("save_note", { space: state.currentSpaceId, id, content });
   await loadNotes();
   await selectNote(id);
   const target = getPreferredEditor() === "live" ? "live" : "edit";
@@ -1854,7 +2549,10 @@ async function openNewSticky() {
     return;
   }
   try {
-    await invoke("create_sticky_window", { id: state.currentId });
+    await invoke("create_sticky_window", {
+      space: state.currentSpaceId,
+      id: state.currentId,
+    });
   } catch {
     showCopyToast("Could not open sticky");
   }
@@ -1993,19 +2691,22 @@ async function deleteCurrentNote() {
   if (!state.currentId) return;
   const wasPinned = isNotePinned(state.currentId);
   const id = state.currentId;
+  const space = state.currentSpaceId;
   invalidatePreviewCache(id);
   invalidateContentCache(id);
-  deleteDiskCachedPreviewHtml(id);
+  deleteDiskCachedPreviewHtml(id, space);
 
-  await invoke("delete_note", { id });
+  await invoke("delete_note", { space, id });
 
-  undoDeleteStack.push({ id, wasPinned });
+  // Undo/redo entries are tagged with the space so a later undo restores
+  // into the same place even if the user has switched spaces in between.
+  undoDeleteStack.push({ id, wasPinned, space });
   redoDeleteStack.length = 0; // new action clears redo
 
   // Remove pin state
   if (wasPinned) {
     state.pinnedNotes.delete(id);
-    savePinnedNotes(state.pinnedNotes);
+    savePinnedNotes(state.pinnedNotes, space);
   }
   // Remove from local list
   state.notes = state.notes.filter((n) => n.id !== id);
@@ -2027,38 +2728,68 @@ async function deleteCurrentNote() {
 
 async function undoDeleteNote() {
   if (undoDeleteStack.length === 0) return;
-  const { id, wasPinned } = undoDeleteStack.pop();
-  const ok = await invoke("restore_note", { id });
+  const entry = undoDeleteStack.pop();
+  const { id, wasPinned, space: noteSpace } = entry;
+  const space = noteSpace || state.currentSpaceId;
+  const ok = await invoke("restore_note", { space, id });
   if (!ok) {
     showCopyToast("Could not restore note");
     return;
   }
-  redoDeleteStack.push({ id, wasPinned });
+  redoDeleteStack.push({ id, wasPinned, space });
   // Restore pin state if it was pinned before deletion
   if (wasPinned) {
-    state.pinnedNotes.add(id);
-    savePinnedNotes(state.pinnedNotes);
+    const pins = space === state.currentSpaceId
+      ? state.pinnedNotes
+      : loadPinnedNotes(space);
+    pins.add(id);
+    savePinnedNotes(pins, space);
+    if (space === state.currentSpaceId) state.pinnedNotes = pins;
   }
-  await loadNotes();
-  await selectNote(id);
+  // Only refresh the visible sidebar if the restored note is in the active space.
+  if (space === state.currentSpaceId) {
+    await loadNotes();
+    await selectNote(id);
+  } else {
+    const spaceLabel = (getSpaces().find((s) => s.id === space) || {}).name || space;
+    showCopyToast(`Restored in ${spaceLabel}`);
+    return;
+  }
   showCopyToast("Note restored");
 }
 
 async function redoDeleteNote() {
   if (redoDeleteStack.length === 0) return;
-  const { id, wasPinned } = redoDeleteStack.pop();
+  const entry = redoDeleteStack.pop();
+  const { id, wasPinned, space: noteSpace } = entry;
+  const space = noteSpace || state.currentSpaceId;
 
-  invalidatePreviewCache(id);
-  invalidateContentCache(id);
-  deleteDiskCachedPreviewHtml(id);
-  await invoke("delete_note", { id });
-  undoDeleteStack.push({ id, wasPinned });
+  if (space === state.currentSpaceId) {
+    invalidatePreviewCache(id);
+    invalidateContentCache(id);
+  }
+  deleteDiskCachedPreviewHtml(id, space);
+  await invoke("delete_note", { space, id });
+  undoDeleteStack.push({ id, wasPinned, space });
 
   // Remove pin state
   if (wasPinned) {
-    state.pinnedNotes.delete(id);
-    savePinnedNotes(state.pinnedNotes);
+    if (space === state.currentSpaceId) {
+      state.pinnedNotes.delete(id);
+      savePinnedNotes(state.pinnedNotes, space);
+    } else {
+      const pins = loadPinnedNotes(space);
+      pins.delete(id);
+      savePinnedNotes(pins, space);
+    }
   }
+
+  if (space !== state.currentSpaceId) {
+    const spaceLabel = (getSpaces().find((s) => s.id === space) || {}).name || space;
+    showCopyToast(`Moved to Trash in ${spaceLabel}`);
+    return;
+  }
+
   // Remove from local list
   state.notes = state.notes.filter((n) => n.id !== id);
   state.totalNotes = Math.max(0, state.totalNotes - 1);
@@ -2080,7 +2811,10 @@ async function redoDeleteNote() {
 }
 
 async function restoreFromTrash(id) {
-  const ok = await invoke("restore_note", { id });
+  const ok = await invoke("restore_note", {
+    space: state.currentSpaceId,
+    id,
+  });
   if (!ok) {
     showCopyToast("Could not restore note");
     return;
@@ -2091,15 +2825,24 @@ async function restoreFromTrash(id) {
 }
 
 async function emptyTrash() {
-  const trashNotes = await invoke("list_trash");
+  const trashNotes = await invoke("list_trash", { space: state.currentSpaceId });
   if (trashNotes.length === 0) {
     showCopyToast("Trash is empty");
     return;
   }
-  await invoke("empty_trash");
-  // Clear undo/redo stacks since those notes are gone forever
-  undoDeleteStack.length = 0;
-  redoDeleteStack.length = 0;
+  await invoke("empty_trash", { space: state.currentSpaceId });
+  // Clear undo/redo entries that pointed into THIS space's trash since
+  // those notes are now gone forever. Other spaces' history survives.
+  for (let i = undoDeleteStack.length - 1; i >= 0; i--) {
+    if (undoDeleteStack[i].space === state.currentSpaceId) {
+      undoDeleteStack.splice(i, 1);
+    }
+  }
+  for (let i = redoDeleteStack.length - 1; i >= 0; i--) {
+    if (redoDeleteStack[i].space === state.currentSpaceId) {
+      redoDeleteStack.splice(i, 1);
+    }
+  }
   showCopyToast("Trash emptied");
 }
 
@@ -2121,6 +2864,78 @@ function showCopyToast(msg = "Copied!") {
   void toast.offsetWidth;
   toast.classList.add("visible");
   setTimeout(() => toast.classList.remove("visible"), 1600);
+}
+
+/** In-app confirm — window.confirm is unreliable in Tauri/WKWebView. */
+let confirmDialogResolve = null;
+
+function ensureConfirmDialog() {
+  let dialog = document.getElementById("confirm-dialog");
+  if (dialog) return dialog;
+
+  dialog = document.createElement("div");
+  dialog.id = "confirm-dialog";
+  dialog.className = "confirm-dialog hidden";
+  dialog.innerHTML = `
+    <div class="confirm-backdrop" data-action="cancel"></div>
+    <div class="confirm-modal" role="alertdialog" aria-modal="true">
+      <h3 class="confirm-title"></h3>
+      <p class="confirm-message"></p>
+      <div class="confirm-actions">
+        <button type="button" class="confirm-cancel-btn" data-action="cancel">Cancel</button>
+        <button type="button" class="confirm-ok-btn" data-action="confirm">Confirm</button>
+      </div>
+    </div>
+  `;
+  document.getElementById("app").appendChild(dialog);
+
+  const finish = (result) => {
+    if (!confirmDialogResolve) return;
+    const resolve = confirmDialogResolve;
+    confirmDialogResolve = null;
+    dialog.classList.add("hidden");
+    document.removeEventListener("keydown", onKeyDown, true);
+    resolve(result);
+  };
+
+  const onKeyDown = (e) => {
+    if (dialog.classList.contains("hidden")) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(false);
+    }
+  };
+
+  dialog.addEventListener("click", (e) => {
+    const action = e.target.closest("[data-action]")?.dataset.action;
+    if (action === "confirm") finish(true);
+    else if (action === "cancel") finish(false);
+  });
+
+  dialog._confirmKeyHandler = onKeyDown;
+  return dialog;
+}
+
+function showConfirmDialog({
+  title = "Are you sure?",
+  message = "",
+  confirmLabel = "Confirm",
+  destructive = false,
+}) {
+  const dialog = ensureConfirmDialog();
+  dialog.querySelector(".confirm-title").textContent = title;
+  dialog.querySelector(".confirm-message").textContent = message;
+  const okBtn = dialog.querySelector(".confirm-ok-btn");
+  okBtn.textContent = confirmLabel;
+  okBtn.classList.toggle("confirm-ok-btn-danger", destructive);
+
+  return new Promise((resolve) => {
+    confirmDialogResolve = resolve;
+    dialog.classList.remove("hidden");
+    document.addEventListener("keydown", dialog._confirmKeyHandler, true);
+    dialog.querySelector(".confirm-cancel-btn").focus();
+  });
 }
 
 function copyNoteMarkdown() {
@@ -2232,7 +3047,14 @@ function scheduleWarmPreviewCache(notes) {
   if (!Array.isArray(notes) || notes.length === 0) return;
   for (const note of notes.slice(0, WARM_PREVIEW_BATCH_MAX)) {
     const id = note?.id;
-    if (!id || id === state.currentId || warmPreviewQueued.has(id)) continue;
+    if (
+      !id ||
+      id === state.currentId ||
+      warmPreviewQueued.has(id) ||
+      !hasCachedContent(id)
+    ) {
+      continue;
+    }
     warmPreviewQueued.add(id);
     warmPreviewQueue.push(id);
   }
@@ -2264,12 +3086,8 @@ async function runWarmPreviewQueue() {
 }
 
 async function warmPreviewForNote(id) {
-  let content = getCachedContent(id);
-  if (content === null) {
-    content = await invoke("read_note", { id }).catch(() => null);
-    if (content === null) return;
-    cacheContent(id, content);
-  }
+  const content = getCachedContent(id);
+  if (content === null) return;
 
   if (!content || content.trim() === "") {
     warmPreviewDone.add(id);
@@ -2410,7 +3228,11 @@ function saveTodoChange() {
     invalidatePreviewCache(state.currentId);
     deleteDiskCachedPreviewHtml(state.currentId);
     const content = editor.getText();
-    await invoke("save_note", { id: state.currentId, content });
+    await invoke("save_note", {
+      space: state.currentSpaceId,
+      id: state.currentId,
+      content,
+    });
     state.dirty = false;
     const title =
       (content.split("\n")[0] || state.currentId)
@@ -2502,11 +3324,14 @@ function renderNoteItem(n) {
   const isPinned = isNotePinned(n.id);
   const isAutoTitle = n.title === "New Note" || n.title === AUTO_TITLE_PLACEHOLDER;
   const titleClass = `note-item-title${isAutoTitle ? " auto-title" : ""}`;
-  const displayTitle = n.title === AUTO_TITLE_PLACEHOLDER ? "New Note" : n.title;
+  const fullTitle = n.title === AUTO_TITLE_PLACEHOLDER ? "New Note" : n.title;
+  const displayTitle = truncateTitle(fullTitle);
+  const titleAttr =
+    displayTitle !== fullTitle ? ` title="${escapeHtml(fullTitle)}"` : "";
   return `
-    <li class="note-item ${n.id === state.currentId ? "active" : ""}${isPinned ? " pinned" : ""}" data-id="${n.id}">
-      <div class="note-item-header">
-        <div class="${titleClass}">${escapeHtml(displayTitle)}</div>
+  <li class="note-item ${n.id === state.currentId ? "active" : ""}${isPinned ? " pinned" : ""}" data-id="${n.id}">
+    <div class="note-item-header">
+        <div class="${titleClass}"${titleAttr}>${escapeHtml(displayTitle)}</div>
         <button class="note-pin-btn${isPinned ? " is-pinned" : ""}" data-pin-id="${n.id}" title="${isPinned ? "Unpin" : "Pin"} note" aria-label="${isPinned ? "Unpin" : "Pin"} note">
           ${PIN_ICON_SVG}
         </button>
@@ -2579,12 +3404,15 @@ let searchTimeout = null;
 
 async function handleSearch(query) {
   state.searchQuery = query;
+  const space = state.currentSpaceId;
   if (!query) {
     // Restore paginated list
     const result = await invoke("list_notes_paginated", {
+      space,
       offset: 0,
       limit: PAGE_SIZE,
     });
+    if (state.currentSpaceId !== space) return;
     state.notes = result.notes;
     state.totalNotes = result.total;
     state.notesOffset = result.notes.length;
@@ -2593,7 +3421,8 @@ async function handleSearch(query) {
     return;
   }
   // Search on backend — returns up to 100 results
-  const results = await invoke("search_notes", { query, limit: 100 });
+  const results = await invoke("search_notes", { space, query, limit: 100 });
+  if (state.currentSpaceId !== space) return;
   state.notes = results;
   state.totalNotes = results.length;
   state.notesOffset = results.length;
@@ -2615,11 +3444,18 @@ function updateTitle() {
   const note = state.notes.find((n) => n.id === state.currentId);
   if (!note) {
     titlebarTitle.textContent = "Raynote";
+    titlebarTitle.removeAttribute("title");
     return;
   }
-  const display =
+  const fullTitle =
     note.title === AUTO_TITLE_PLACEHOLDER ? "New Note" : note.title;
+  const display = truncateTitle(fullTitle);
   titlebarTitle.textContent = display;
+  if (display !== fullTitle) {
+    titlebarTitle.title = fullTitle;
+  } else {
+    titlebarTitle.removeAttribute("title");
+  }
 }
 
 // ─── Mode switching ───
@@ -2902,7 +3738,9 @@ function renderPalette() {
     paletteInput.placeholder = "Search trash...";
     clearTimeout(paletteSearchTimeout);
     paletteSearchTimeout = setTimeout(async () => {
-      const trashNotes = await invoke("list_trash");
+      const trashNotes = await invoke("list_trash", {
+        space: state.currentSpaceId,
+      });
       const filtered = query
         ? trashNotes.filter(
             (n) =>
@@ -2969,7 +3807,11 @@ function renderPalette() {
       renderPaletteItems([...pinnedItems, ...unpinnedItems]);
     } else {
       paletteSearchTimeout = setTimeout(async () => {
-        const results = await invoke("search_notes", { query, limit: 50 });
+        const results = await invoke("search_notes", {
+          space: state.currentSpaceId,
+          query,
+          limit: 50,
+        });
         // Sort pinned to top of search results
         const pinnedResults = results.filter((n) => isNotePinned(n.id));
         const unpinnedResults = results.filter((n) => !isNotePinned(n.id));
@@ -3037,6 +3879,7 @@ async function togglePin() {
 
 // ─── Event listeners ───
 let _saveTimeout = null;
+let eventListenersReady = false;
 function scheduleSave() {
   state.dirty = true;
   clearTimeout(_saveTimeout);
@@ -3044,6 +3887,9 @@ function scheduleSave() {
 }
 
 function setupEventListeners() {
+  if (eventListenersReady) return;
+  eventListenersReady = true;
+
   // Editor input — adapter forwards from whichever backend is active
   editor.onInput(scheduleSave);
 
@@ -3180,6 +4026,25 @@ function setupEventListeners() {
     if (e.defaultPrevented) return;
 
     const sc = state.shortcuts;
+
+    // Cmd/Ctrl + 1..4 — switch spaces (only matters once a second space
+    // exists; with only the default space this is a no-op so the digit
+    // can still be typed when there are other modifier conflicts).
+    if (
+      !isSticky &&
+      (e.metaKey || e.ctrlKey) &&
+      !e.altKey &&
+      !e.shiftKey &&
+      /^[1-4]$/.test(e.key)
+    ) {
+      const idx = parseInt(e.key, 10) - 1;
+      const spaces = getSpaces();
+      if (spaces.length > 1 && idx < spaces.length) {
+        e.preventDefault();
+        switchToSpace(spaces[idx].id);
+        return;
+      }
+    }
 
     if (matchesShortcut(e, sc.openPalette)) {
       e.preventDefault();
@@ -3503,10 +4368,38 @@ function navigateNotes(direction) {
 }
 
 // ─── Tauri event listeners ───
+let tauriListenersReady = false;
 function setupTauriListeners() {
+  if (tauriListenersReady) return;
+  tauriListenersReady = true;
+
   listen("quick-capture", () => {
     if (isSticky) return;
     createNote();
+  });
+  // Streamed per-note metadata during the iCloud scan. Each event is tagged
+  // with the space it belongs to — drop events from other spaces so a scan
+  // running in the background doesn't pollute the active sidebar.
+  listen("note-meta-loaded", (event) => {
+    if (isSticky) return;
+    const payload = event.payload || {};
+    if (payload.space !== state.currentSpaceId) return;
+    upsertNoteFromScan(payload.meta);
+  });
+  listen("notes-loading-progress", (event) => {
+    if (isSticky) return;
+    const payload = event.payload || {};
+    if (payload.space !== state.currentSpaceId) return;
+    updateNotesLoadingBanner(payload);
+  });
+  listen("notes-loaded", (event) => {
+    if (isSticky) return;
+    const payload = event.payload || {};
+    if (payload.space !== state.currentSpaceId) return;
+    hideNotesLoadingBanner();
+    refreshNotesFromBackend({ selectIfNone: true }).catch((err) => {
+      console.error("Failed to refresh notes after iCloud scan:", err);
+    });
   });
 }
 

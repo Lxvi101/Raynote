@@ -37,7 +37,10 @@
         font-size: 22px;
         font-weight: 600;
         letter-spacing: 0.02em;
-        background: linear-gradient(135deg, #ffffff 0%, #7c6ff7 100%);
+        /* Match the red edge-glow accent (rgb(255, 70, 90)) used on
+           #app's rim sweep, so boot and the rest of the app feel
+           continuous rather than starting purple then switching. */
+        background: linear-gradient(135deg, #ffffff 0%, #ff465a 100%);
         -webkit-background-clip: text;
         background-clip: text;
         -webkit-text-fill-color: transparent;
@@ -50,6 +53,7 @@
         background: rgba(255, 255, 255, 0.06);
         border-radius: 1px;
         overflow: hidden;
+        box-shadow: 0 0 12px rgba(255, 70, 90, 0.12);
       }
       .splash-bar::after {
         content: "";
@@ -58,7 +62,7 @@
         left: -40%;
         width: 40%;
         height: 100%;
-        background: linear-gradient(90deg, transparent, #7c6ff7, transparent);
+        background: linear-gradient(90deg, transparent, #ff465a, transparent);
         animation: splash-slide 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
       }
       @keyframes splash-pulse {
@@ -146,16 +150,5 @@
     </div>
 
     <script type="module" src="/src/main.js"></script>
-    <script>
-      // Safety net — if init() throws or hangs, drop the splash after 8s so the
-      // user is never staring at a frozen loader. Normal path hides it from main.js.
-      setTimeout(function () {
-        var s = document.getElementById("splash");
-        if (s && !s.classList.contains("hidden")) {
-          s.classList.add("hidden");
-          setTimeout(function () { s.remove(); }, 300);
-        }
-      }, 8000);
-    </script>
   </body>
 </html>

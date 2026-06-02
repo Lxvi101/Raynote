@@ -191,6 +191,12 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
+.titlebar-left {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .titlebar-title {
   font-size: 12px;
   font-weight: 500;
@@ -198,6 +204,11 @@ html, body {
   letter-spacing: 0.02em;
   margin-left: 8px;
   -webkit-app-region: drag;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .titlebar-btn {
@@ -941,6 +952,55 @@ html, body {
   border-radius: 50%;
   animation: preview-spin 0.7s linear infinite;
   flex: 0 0 auto;
+}
+
+/* ─── Notes loading banner ───
+   Pill above the sidebar list that narrates the iCloud scan after a
+   cold boot ("Loading 12 of 51 notes from iCloud…"). Tinted with the
+   red edge-glow accent so it reads as part of the same family as the
+   rim sweep on #app, not the purple primary accent. */
+.notes-loading-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  margin: 4px 10px 6px;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 70, 90, 0.14),
+    rgba(255, 70, 90, 0.03)
+  );
+  border: 1px solid rgba(255, 70, 90, 0.22);
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 11.5px;
+  letter-spacing: 0.01em;
+  box-shadow: 0 0 14px var(--accent-red-glow);
+  opacity: 1;
+  transition: opacity 220ms ease;
+}
+
+.notes-loading-banner.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.notes-loading-banner-spinner {
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid rgba(255, 70, 90, 0.22);
+  border-top-color: var(--accent-red);
+  border-radius: 50%;
+  animation: preview-spin 0.7s linear infinite;
+  flex: 0 0 auto;
+  filter: drop-shadow(0 0 4px var(--accent-red-glow));
+}
+
+.notes-loading-banner-text {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ─── Command Palette ─── */
@@ -2082,4 +2142,332 @@ input[type="range"].setting-range:disabled {
     var(--sticky-glass-1, rgba(20, 22, 28, 0.92)),
     var(--sticky-glass-2, rgba(15, 17, 22, 0.90))
   );
+}
+
+/* ─── Spaces switcher (sidebar bottom) ───
+   Minimal emoji row with a sliding highlight behind the active space. */
+.space-switcher {
+  flex-shrink: 0;
+  padding: 4px 10px 8px;
+  display: flex;
+  justify-content: center;
+}
+
+.space-switcher.hidden {
+  display: none;
+}
+
+.space-switcher-scroll {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+}
+
+.space-switcher-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 160ms cubic-bezier(0.2, 0, 0, 1),
+              width 160ms cubic-bezier(0.2, 0, 0, 1),
+              opacity 120ms ease;
+  will-change: transform, width;
+}
+
+.space-btn {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  font: inherit;
+  opacity: 0.42;
+  transition: opacity var(--transition), transform var(--transition);
+}
+
+.space-btn:hover {
+  opacity: 0.78;
+}
+
+.space-btn.active {
+  opacity: 1;
+}
+
+.space-emoji {
+  font-size: 15px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* Space switch content animation — toggled via .space-switch-animate on <html>.
+   Out: quick scale-down + fade (ease-in so it accelerates away).
+   In:  crisp pop-back with a decelerating curve. */
+html.space-switch-animate #note-list,
+html.space-switch-animate #notes-loading-banner,
+html.space-switch-animate #editor-area {
+  transition: opacity 120ms ease-in,
+              transform 120ms ease-in;
+  will-change: opacity, transform;
+}
+
+html.space-switch-out #note-list,
+html.space-switch-out #notes-loading-banner,
+html.space-switch-out #editor-area {
+  opacity: 0;
+  transform: scale(0.975);
+  pointer-events: none;
+}
+
+html.space-switch-in #note-list,
+html.space-switch-in #notes-loading-banner,
+html.space-switch-in #editor-area {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .space-switcher-indicator,
+  .space-btn {
+    transition: none;
+  }
+
+  html.space-switch-animate #note-list,
+  html.space-switch-animate #notes-loading-banner,
+  html.space-switch-animate #editor-area {
+    transition: none;
+  }
+}
+
+/* ─── Spaces — settings panel ─── */
+.space-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+}
+
+.space-row + .space-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.space-row-emoji {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  padding: 0;
+  transition: background var(--transition),
+              border-color var(--transition),
+              transform var(--transition);
+}
+
+.space-row-emoji:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-focus);
+  transform: scale(1.04);
+}
+
+.space-row-name {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+}
+
+.space-row-shortcut {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 22px;
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.space-row-default {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 0 6px;
+}
+
+.space-row-delete {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.space-row-delete:hover {
+  background: rgba(247, 79, 111, 0.12);
+  color: var(--danger);
+  border-color: rgba(247, 79, 111, 0.24);
+}
+
+.space-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  margin-top: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.space-add-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-style: solid;
+  border-color: rgba(255, 255, 255, 0.18);
+  color: var(--text);
+}
+
+.space-add-btn:disabled,
+.space-add-btn.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.space-add-btn svg {
+  flex-shrink: 0;
+}
+
+/* ─── Confirm dialog ─── */
+.confirm-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 160;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-dialog.hidden {
+  display: none;
+}
+
+.confirm-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(6px);
+}
+
+.confirm-modal {
+  position: relative;
+  width: min(380px, 92vw);
+  padding: 20px 22px 18px;
+  background: linear-gradient(170deg, #1c1c24 0%, #141418 100%);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55),
+              0 0 0 1px rgba(255, 255, 255, 0.03);
+  animation: settings-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.confirm-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.confirm-message {
+  margin: 0 0 18px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.confirm-cancel-btn,
+.confirm-ok-btn {
+  height: 30px;
+  padding: 0 14px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition),
+              color var(--transition);
+}
+
+.confirm-cancel-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.confirm-cancel-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.confirm-ok-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-focus);
+  color: var(--text);
+}
+
+.confirm-ok-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.confirm-ok-btn.confirm-ok-btn-danger {
+  background: rgba(247, 79, 111, 0.14);
+  border-color: rgba(247, 79, 111, 0.35);
+  color: #ff8fa3;
+}
+
+.confirm-ok-btn.confirm-ok-btn-danger:hover {
+  background: rgba(247, 79, 111, 0.22);
+  border-color: rgba(247, 79, 111, 0.5);
+  color: #ffb3c0;
 }
