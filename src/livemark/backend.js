@@ -46,7 +46,9 @@ export class LiveBackend {
     const s = Math.max(0, Math.min(start, docLen));
     const e = Math.max(0, Math.min(end, docLen));
     this.view.dispatch({
-      selection: s === e ? EditorSelection.cursor(s) : EditorSelection.range(s, e),
+      selection:
+        s === e ? EditorSelection.cursor(s) : EditorSelection.range(s, e),
+      scrollIntoView: true,
     });
   }
 

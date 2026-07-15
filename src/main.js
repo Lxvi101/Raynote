@@ -617,8 +617,8 @@ const defaultShortcuts = {
     meta: true,
     shift: true,
   },
-  toggleEdit: { label: "Toggle Edit/Preview", key: "e", meta: true },
-  toggleLive: { label: "Toggle Live Preview", key: "l", meta: true, shift: true },
+  toggleEdit: { label: "Toggle Source Mode", key: "e", meta: true },
+  toggleLive: { label: "Toggle Reading Mode", key: "l", meta: true, shift: true },
   toggleSidebar: { label: "Toggle Sidebar", key: "s", meta: true, shift: true },
   save: { label: "Save Note", key: "s", meta: true },
   closeWindow: { label: "Close Window", key: "w", meta: true },
@@ -1100,17 +1100,17 @@ const titlebarTitle = $("#titlebar-title");
 // ─── Editor adapter setup ───
 // `editor` (imported) is the abstraction; backends are registered for each
 // supported mode. The textarea backend is the only one available at boot —
-// the live-preview (CM6) backend is lazy-imported on first switch into
-// live mode.
+// the live markdown (CM6) backend is lazy-imported (and idle-preloaded)
+// since it is the default editing surface.
 editor.register("textarea", new TextareaBackend(editorEl));
 editor.setActive("textarea");
 
 // Remember the last editor surface the user picked so re-launching the app
-// doesn't force everyone back to raw textarea every time.
+// keeps their choice. Live markdown is the default.
 const STORAGE_PREFERRED_EDITOR = "raynote-preferred-editor";
 function getPreferredEditor() {
   const v = localStorage.getItem(STORAGE_PREFERRED_EDITOR);
-  return v === "live" ? "live" : "textarea";
+  return v === "textarea" ? "textarea" : "live";
 }
 function setPreferredEditor(name) {
   if (name === "textarea" || name === "live") {
@@ -2061,6 +2061,18 @@ async function init() {
 
   setupEventListeners();
   setupTauriListeners();
+
+  // Live markdown is the default surface — warm its module during idle time
+  // so the first note open doesn't pay the import cost (stays off the boot
+  // critical path).
+  if (getPreferredEditor() === "live" && !liveEditorEl) {
+    const warm = () => ensureLiveEditor().catch(() => {});
+    if ("requestIdleCallback" in window) {
+      window.requestIdleCallback(warm, { timeout: 3000 });
+    } else {
+      setTimeout(warm, 1000);
+    }
+  }
 }
 
 // First load on the main window. The backend seeds from a local metadata cache
@@ -2394,8 +2406,15 @@ async function selectNote(id) {
   if (!isSticky) rememberLastNote(state.currentSpaceId, id);
   updateNoteListActiveState(prevId, id);
   updateTitle();
-  preview.innerHTML = '<div class="preview-loading"></div>';
-  setModeRaw("preview");
+
+  // Notes open straight into the live markdown editor. Only fall back to the
+  // reading pane while the live module is still loading (or if it failed) so
+  // there's no blank flash on cold starts.
+  const openLive = getPreferredEditor() === "live";
+  if (!openLive || !liveEditorEl) {
+    preview.innerHTML = '<div class="preview-loading"></div>';
+    setModeRaw("preview");
+  }
 
   let content = getCachedContent(id);
   if (content === null) {
@@ -2414,6 +2433,34 @@ async function selectNote(id) {
   if (renderGeneration !== gen || state.currentId !== id) return;
 
   editor.setText(content);
+
+  if (openLive) {
+    const loaded = await ensureLiveEditor().then(
+      () => true,
+      (err) => {
+        console.error("Failed to load live editor:", err);
+        return false;
+      },
+    );
+    if (renderGeneration !== gen || state.currentId !== id) return;
+    if (loaded) {
+      editor.switchTo("live");
+      editor.setSelection(0, 0); // top of note, scrolled into view
+      setModeRaw("live");
+      editor.focus();
+      return;
+    }
+    // Live module failed — fall through to the reading pane.
+    preview.innerHTML = '<div class="preview-loading"></div>';
+    setModeRaw("preview");
+  } else {
+    // The user explicitly prefers the raw source editor — open there.
+    editor.switchTo("textarea");
+    editor.setSelection(0, 0);
+    setModeRaw("edit");
+    editor.focus();
+    return;
+  }
 
   // Empty note: show empty state instantly
   if (!content || content.trim() === "") {
@@ -3460,33 +3507,37 @@ function updateTitle() {
 
 // ─── Mode switching ───
 // Three modes:
-//   - "edit"    : raw markdown textarea visible
-//   - "preview" : rendered HTML (marked) visible
-//   - "live"    : live-preview CodeMirror editor visible (lazy-loaded)
+//   - "live"    : live markdown editor (Notion/Obsidian style) — the default
+//   - "edit"    : raw markdown source in a textarea
+//   - "preview" : read-only rendered HTML (marked)
 //
-// "edit" and "live" both put an editor in front; the adapter's active
+// "live" and "edit" both put an editor in front; the adapter's active
 // backend tracks which one owns the doc text. Switching between them
 // transfers the text over.
 
 const MODE_LABELS = {
-  edit: "editing",
-  preview: "preview",
+  edit: "source",
+  preview: "reading",
   live: "live",
 };
 
-let liveEditorEl = null; // populated on first switch into live mode
+let liveEditorEl = null; // populated on first entry into live mode
 let liveEditorLoadPromise = null;
 
 async function ensureLiveEditor() {
   if (liveEditorEl) return liveEditorEl;
   if (liveEditorLoadPromise) return liveEditorLoadPromise;
   liveEditorLoadPromise = (async () => {
-    const mod = await import("./livepreview/index.js");
+    const mod = await import("./livemark/index.js");
     liveEditorEl = mod.setupLiveEditor({
       container: document.getElementById("editor-area"),
       adapter: editor,
-      onSaveTrigger: scheduleSave,
-      getActiveNoteId: () => state.currentId,
+      onOpenLink: (url) =>
+        shellOpen(url).catch(() => showCopyToast("Failed to open link")),
+      onOpenAsset: (name) =>
+        invoke("reveal_asset", { name }).catch(() =>
+          showCopyToast("Failed to open file"),
+        ),
     });
     return liveEditorEl;
   })();
@@ -3602,20 +3653,21 @@ function getCommands() {
       },
       { label: "Empty Trash", action: emptyTrash },
       {
-        label: "Toggle Edit/Preview",
+        label: "Toggle Source Mode",
         hint: formatShortcut(state.shortcuts.toggleEdit),
-        action: () => {
-          if (state.mode === "edit" || state.mode === "live") {
-            setMode("preview");
-          } else {
-            setMode(getPreferredEditor() === "live" ? "live" : "edit");
-          }
-        },
+        action: () => setMode(state.mode === "edit" ? "live" : "edit"),
       },
       {
-        label: "Toggle Live Preview",
+        label: "Toggle Reading Mode",
         hint: formatShortcut(state.shortcuts.toggleLive),
-        action: () => setMode(state.mode === "live" ? "preview" : "live"),
+        action: () =>
+          setMode(
+            state.mode === "preview"
+              ? getPreferredEditor() === "live"
+                ? "live"
+                : "edit"
+              : "preview",
+          ),
       },
       {
         label: "Pin Window on Top",
@@ -3680,9 +3732,21 @@ function getCommands() {
     },
     { label: "Empty Trash", action: emptyTrash },
     {
-      label: "Toggle Edit/Preview",
+      label: "Toggle Source Mode",
       hint: formatShortcut(state.shortcuts.toggleEdit),
-      action: () => setMode(state.mode === "edit" ? "preview" : "edit"),
+      action: () => setMode(state.mode === "edit" ? "live" : "edit"),
+    },
+    {
+      label: "Toggle Reading Mode",
+      hint: formatShortcut(state.shortcuts.toggleLive),
+      action: () =>
+        setMode(
+          state.mode === "preview"
+            ? getPreferredEditor() === "live"
+              ? "live"
+              : "edit"
+            : "preview",
+        ),
     },
     {
       label: "Toggle Sidebar",
@@ -4084,22 +4148,24 @@ function setupEventListeners() {
 
     if (matchesShortcut(e, sc.toggleEdit)) {
       e.preventDefault();
+      // ⌘E: flip between the live editor and raw markdown source.
       if (state.currentId) {
-        if (state.mode === "edit" || state.mode === "live") {
-          setMode("preview");
-        } else {
-          const target = getPreferredEditor() === "live" ? "live" : "edit";
-          setMode(target);
-          editor.focus();
-        }
+        setMode(state.mode === "edit" ? "live" : "edit").then(() =>
+          editor.focus(),
+        );
       }
       return;
     }
 
     if (matchesShortcut(e, sc.toggleLive)) {
       e.preventDefault();
+      // ⌘⇧L: flip between reading mode and the preferred editor.
       if (state.currentId) {
-        setMode(state.mode === "live" ? "preview" : "live");
+        if (state.mode === "preview") {
+          setMode(getPreferredEditor() === "live" ? "live" : "edit");
+        } else {
+          setMode("preview");
+        }
       }
       return;
     }
