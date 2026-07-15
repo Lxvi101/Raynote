@@ -86,7 +86,13 @@ export const inlinePlugin = ViewPlugin.fromClass(
     }
 
     update(update) {
-      if (update.docChanged || update.viewportChanged || update.selectionSet) {
+      if (
+        update.docChanged ||
+        update.viewportChanged ||
+        update.selectionSet ||
+        // Background parsing extended the tree without a doc change.
+        syntaxTree(update.state) !== syntaxTree(update.startState)
+      ) {
         this.build(update.view);
       }
     }
@@ -128,6 +134,10 @@ export const inlinePlugin = ViewPlugin.fromClass(
       const tree = syntaxTree(state);
 
       for (const { from: vFrom, to: vTo } of view.visibleRanges) {
+        // Multi-line nodes (blockquotes, code blocks) can extend far past the
+        // viewport; clamp their per-line loops to the visible line span.
+        const vFirstLine = doc.lineAt(vFrom).number;
+        const vLastLine = doc.lineAt(vTo).number;
         tree.iterate({
           from: vFrom,
           to: vTo,
@@ -313,7 +323,9 @@ export const inlinePlugin = ViewPlugin.fromClass(
             if (name === "Blockquote") {
               const startLine = doc.lineAt(node.from);
               const endLine = doc.lineAt(node.to);
-              for (let n = startLine.number; n <= endLine.number; n++) {
+              const first = Math.max(startLine.number, vFirstLine);
+              const last = Math.min(endLine.number, vLastLine);
+              for (let n = first; n <= last; n++) {
                 decos.push(
                   Decoration.line({
                     attributes: { class: "cm-blockquote-line" },
@@ -334,7 +346,9 @@ export const inlinePlugin = ViewPlugin.fromClass(
             if (name === "FencedCode" || name === "CodeBlock") {
               const startLine = doc.lineAt(node.from);
               const endLine = doc.lineAt(node.to);
-              for (let n = startLine.number; n <= endLine.number; n++) {
+              const first = Math.max(startLine.number, vFirstLine);
+              const last = Math.min(endLine.number, vLastLine);
+              for (let n = first; n <= last; n++) {
                 let cls = "cm-codeblock-line";
                 if (n === startLine.number) cls += " cm-codeblock-first";
                 if (n === endLine.number) cls += " cm-codeblock-last";

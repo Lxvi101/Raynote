@@ -23,7 +23,7 @@ import { GFM } from "@lezer/markdown";
 
 import { LiveBackend } from "./backend.js";
 import { inlinePlugin } from "./inline.js";
-import { blockField } from "./blocks.js";
+import { blockField, blockRebuildScheduler } from "./blocks.js";
 import { raynoteTheme, raynoteHighlight } from "./theme.js";
 import { formatKeymap } from "./commands.js";
 
@@ -77,6 +77,7 @@ export function setupLiveEditor({ container, adapter, onOpenLink, onOpenAsset })
         EditorView.lineWrapping,
         inlinePlugin,
         blockField,
+        blockRebuildScheduler,
         raynoteHighlight,
         raynoteTheme,
         EditorView.domEventHandlers({

@@ -6,13 +6,21 @@
 // code-fence chrome live here.
 //
 // Cost stays bounded despite being full-document:
+//   - keystrokes take the cheap path: existing decorations are MAPPED through
+//     the change; the scheduler plugin below dispatches a throttled full
+//     rebuild once ~120ms have passed
 //   - the syntax tree is incremental; iteration is cheap
 //   - widget DOM is only materialized inside the viewport by CM6
 //   - selection-only updates rebuild only when some region's touch-state
 //     actually flipped (tracked in `regions`)
+//
+// The scheduler also watches the syntax-tree identity, because CM6's
+// background parser extends the tree via transactions with no doc/selection
+// change — without that, blocks beyond the initial parse budget would never
+// get widgets in long notes.
 
-import { StateField } from "@codemirror/state";
-import { Decoration, EditorView } from "@codemirror/view";
+import { StateField, StateEffect } from "@codemirror/state";
+import { Decoration, EditorView, ViewPlugin } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import { selectionTouchesLines } from "./reveal.js";
 import {
@@ -176,12 +184,28 @@ function touchStateChanged(value, state) {
   return false;
 }
 
+export const rebuildBlocks = StateEffect.define();
+
 export const blockField = StateField.define({
   create(state) {
     return build(state);
   },
   update(value, tr) {
-    if (tr.docChanged) return build(tr.state);
+    for (const e of tr.effects) {
+      if (e.is(rebuildBlocks)) return build(tr.state);
+    }
+    if (tr.docChanged) {
+      // Cheap keystroke path: shift existing decorations along with the edit.
+      // The scheduler plugin dispatches rebuildBlocks shortly after.
+      return {
+        decos: value.decos.map(tr.changes),
+        regions: value.regions.map((r) => ({
+          from: tr.changes.mapPos(r.from, -1),
+          to: tr.changes.mapPos(r.to, 1),
+          touched: r.touched,
+        })),
+      };
+    }
     if (tr.selection && touchStateChanged(value, tr.state)) {
       return build(tr.state);
     }
@@ -194,3 +218,35 @@ export const blockField = StateField.define({
     EditorView.atomicRanges.of((view) => view.state.field(f).decos),
   ],
 });
+
+// Throttles full rebuilds of blockField: at most one per REBUILD_MS, fired
+// after doc changes or whenever the background parser has extended the
+// syntax tree (tree identity change with no doc edit).
+const REBUILD_MS = 120;
+
+export const blockRebuildScheduler = ViewPlugin.fromClass(
+  class {
+    constructor(view) {
+      this.view = view;
+      this.timer = null;
+      this.tree = syntaxTree(view.state);
+    }
+    update(update) {
+      const tree = syntaxTree(update.state);
+      if (update.docChanged || tree !== this.tree) {
+        this.tree = tree;
+        this.schedule();
+      }
+    }
+    schedule() {
+      if (this.timer !== null) return;
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        this.view.dispatch({ effects: rebuildBlocks.of(null) });
+      }, REBUILD_MS);
+    }
+    destroy() {
+      if (this.timer !== null) clearTimeout(this.timer);
+    }
+  },
+);

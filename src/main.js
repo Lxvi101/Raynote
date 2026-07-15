@@ -774,10 +774,16 @@ const state = {
   currentSpaceId: initialSpaceId,
   pinnedNotes: loadPinnedNotes(initialSpaceId),
   currentId: null,
-  mode: "preview", // 'preview' | 'edit' | 'live'
+  // 'live' | 'edit' | 'preview'. Starts on the preferred editing surface so
+  // the first note opens there; selectNote keeps whatever mode the user is in.
+  mode: getPreferredEditor() === "live" ? "live" : "edit",
   sidebarOpen: true,
   pinned: false,
   dirty: false,
+  // False while a note's content is being fetched — blocks scheduleSave and
+  // saveCurrentNote so text still belonging to the PREVIOUS note can never be
+  // written under the new note's id.
+  contentReady: false,
   paletteMode: null, // null | 'notes' | 'commands'
   selectedPaletteIndex: 0,
   settingsOpen: false,
@@ -2014,6 +2020,13 @@ async function init() {
     hideSplash();
   }
 
+  // Live markdown is the default surface, so warm its module NOW, in
+  // parallel with the note-metadata load below. Fire-and-forget: nothing on
+  // the boot path awaits it here, but the first selectNote() awaits the same
+  // promise, so the chunk import overlaps the iCloud read instead of
+  // serializing after it.
+  ensureLiveEditor().catch(() => {});
+
   await loadNotesInitial();
 
   // Sticky-window splash dismissal still happens here, after its single
@@ -2061,18 +2074,6 @@ async function init() {
 
   setupEventListeners();
   setupTauriListeners();
-
-  // Live markdown is the default surface — warm its module during idle time
-  // so the first note open doesn't pay the import cost (stays off the boot
-  // critical path).
-  if (getPreferredEditor() === "live" && !liveEditorEl) {
-    const warm = () => ensureLiveEditor().catch(() => {});
-    if ("requestIdleCallback" in window) {
-      window.requestIdleCallback(warm, { timeout: 3000 });
-    } else {
-      setTimeout(warm, 1000);
-    }
-  }
 }
 
 // First load on the main window. The backend seeds from a local metadata cache
@@ -2388,6 +2389,10 @@ async function selectNote(id) {
   if (state.dirty && state.currentId) {
     await saveCurrentNote();
   }
+  // Kill any still-armed debounce from the note we're leaving — if it fired
+  // during the async load below it would save the OLD note's text under the
+  // NEW note's id.
+  clearTimeout(_saveTimeout);
 
   // If the note we're leaving still has the auto-title placeholder, generate a title in the background
   if (state.currentId) {
@@ -2403,21 +2408,35 @@ async function selectNote(id) {
   const gen = ++renderGeneration;
   cancelPendingMarkdownRender();
   state.currentId = id;
+  // Until the new note's text is actually in the editor, nothing may save —
+  // the editor still holds the previous note's content.
+  state.contentReady = false;
+  state.dirty = false;
   if (!isSticky) rememberLastNote(state.currentSpaceId, id);
   updateNoteListActiveState(prevId, id);
   updateTitle();
 
-  // Notes open straight into the live markdown editor. Only fall back to the
-  // reading pane while the live module is still loading (or if it failed) so
-  // there's no blank flash on cold starts.
-  const openLive = getPreferredEditor() === "live";
-  if (!openLive || !liveEditorEl) {
+  // The surface follows the mode the user is in: reading stays reading,
+  // source stays source, live (the default) stays live.
+  const surface =
+    state.mode === "preview" ? "preview" : state.mode === "edit" ? "edit" : "live";
+
+  let content = getCachedContent(id);
+  const cacheHit = content !== null;
+
+  // Show the loading pane whenever the target surface can't display the new
+  // note instantly. This also hides the previous note's editor during the
+  // async read so stale content is never presented under the new title.
+  if (
+    surface === "preview" ||
+    !cacheHit ||
+    (surface === "live" && !liveEditorEl)
+  ) {
     preview.innerHTML = '<div class="preview-loading"></div>';
     setModeRaw("preview");
   }
 
-  let content = getCachedContent(id);
-  if (content === null) {
+  if (!cacheHit) {
     try {
       content = await invoke("read_note", { space: state.currentSpaceId, id });
     } catch (err) {
@@ -2425,6 +2444,7 @@ async function selectNote(id) {
       console.error("Failed to read note:", err);
       preview.innerHTML =
         '<div class="empty-state">This note could not be loaded.</div>';
+      setModeRaw("preview");
       return;
     }
     cacheContent(id, content);
@@ -2433,8 +2453,9 @@ async function selectNote(id) {
   if (renderGeneration !== gen || state.currentId !== id) return;
 
   editor.setText(content);
+  state.contentReady = true;
 
-  if (openLive) {
+  if (surface === "live") {
     const loaded = await ensureLiveEditor().then(
       () => true,
       (err) => {
@@ -2453,8 +2474,7 @@ async function selectNote(id) {
     // Live module failed — fall through to the reading pane.
     preview.innerHTML = '<div class="preview-loading"></div>';
     setModeRaw("preview");
-  } else {
-    // The user explicitly prefers the raw source editor — open there.
+  } else if (surface === "edit") {
     editor.switchTo("textarea");
     editor.setSelection(0, 0);
     setModeRaw("edit");
@@ -2524,7 +2544,10 @@ function updateNoteListActiveState(prevId, newId) {
 }
 
 async function saveCurrentNote() {
-  if (!state.currentId) return;
+  // contentReady is false while a note switch is still fetching content — the
+  // editor text belongs to the previous note and must not be saved under the
+  // current id.
+  if (!state.currentId || !state.contentReady) return;
   invalidatePreviewCache(state.currentId);
   deleteDiskCachedPreviewHtml(state.currentId);
   const content = editor.getText();
@@ -3598,7 +3621,9 @@ function setMode(mode) {
   }
 
   if (mode === "edit") {
-    setPreferredEditor("textarea");
+    // Deliberately NOT persisted as the preferred editor: source mode is a
+    // per-session peek (⌘E, file drops), and persisting it here would
+    // silently flip the app's default surface away from live.
     editor.switchTo("textarea");
     applyModeChrome("edit");
     return Promise.resolve();
@@ -3945,6 +3970,7 @@ async function togglePin() {
 let _saveTimeout = null;
 let eventListenersReady = false;
 function scheduleSave() {
+  if (!state.contentReady) return; // mid note-switch; editor text is stale
   state.dirty = true;
   clearTimeout(_saveTimeout);
   _saveTimeout = setTimeout(() => saveCurrentNote(), 800);

@@ -324,9 +324,26 @@ function renderCellInto(el, text) {
 }
 
 function splitRow(line) {
-  // Strip leading/trailing pipes, split on unescaped pipes.
+  // Strip leading/trailing pipes, split on unescaped pipes. Written as a
+  // manual scan — a lookbehind regex would throw on Safari/WKWebView < 16.4,
+  // which the safari16 build target still supports.
   const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-  return trimmed.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
+  const cells = [];
+  let cur = "";
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (ch === "\\" && trimmed[i + 1] === "|") {
+      cur += "|";
+      i++;
+    } else if (ch === "|") {
+      cells.push(cur.trim());
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  cells.push(cur.trim());
+  return cells;
 }
 
 function parseAligns(delimLine) {
