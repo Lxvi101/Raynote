@@ -228,8 +228,14 @@ export class CodeHeaderWidget extends WidgetType {
     return other.lang === this.lang;
   }
   toDOM(view) {
+    // In-flow empty inline anchor: keeps the line box at normal strut height
+    // (identical to the raw ``` text this widget replaces) while the visible
+    // header is absolutely positioned and contributes nothing to layout.
+    const anchor = document.createElement("span");
+    anchor.className = "cm-code-header-anchor";
     const el = document.createElement("span");
     el.className = "cm-code-header";
+    anchor.appendChild(el);
 
     const label = document.createElement("span");
     label.className = "cm-code-lang";
@@ -251,7 +257,7 @@ export class CodeHeaderWidget extends WidgetType {
       setTimeout(() => btn.classList.remove("copied"), 1200);
     });
     el.appendChild(btn);
-    return el;
+    return anchor;
   }
   // Resolve the enclosing FencedCode at click time so document shifts since
   // render can't make us copy stale text.

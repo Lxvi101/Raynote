@@ -129,6 +129,7 @@ export const raynoteTheme = EditorView.theme(
     // the classes apply whether the fence is rendered (header/cap widget) or
     // revealed (raw ```), so entering/leaving the block never shifts layout.
     ".cm-codeblock-first": {
+      position: "relative", // anchors the absolutely-positioned header
       borderTop: "1px solid rgba(255, 255, 255, 0.08)",
       borderRadius: "10px 10px 0 0",
       background: "rgba(255, 255, 255, 0.03)",
@@ -142,13 +143,16 @@ export const raynoteTheme = EditorView.theme(
       marginBottom: "6px",
       paddingBottom: "4px",
     },
+    // Absolutely positioned so the widget contributes NOTHING to the line
+    // box — the fence line's height comes from the same text strut whether
+    // it shows the raw ``` or this header, so toggling can't shift layout.
     ".cm-code-header": {
-      display: "inline-flex",
-      width: "100%",
-      // Exactly one text line tall (the strut is 1.6 line-height), so the
-      // widget occupies the same height as the raw ``` text it replaces.
-      height: "1.6em",
-      verticalAlign: "top",
+      position: "absolute",
+      top: "0",
+      bottom: "0",
+      left: "14px",
+      right: "14px",
+      display: "flex",
       alignItems: "center",
       justifyContent: "space-between",
     },
