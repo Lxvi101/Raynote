@@ -776,7 +776,12 @@ const state = {
   currentId: null,
   // 'live' | 'edit' | 'preview'. Starts on the preferred editing surface so
   // the first note opens there; selectNote keeps whatever mode the user is in.
-  mode: getPreferredEditor() === "live" ? "live" : "edit",
+  // Reads localStorage directly: getPreferredEditor()'s STORAGE_ const isn't
+  // initialized yet at this point in module evaluation (TDZ).
+  mode:
+    localStorage.getItem("raynote-preferred-editor") === "textarea"
+      ? "edit"
+      : "live",
   sidebarOpen: true,
   pinned: false,
   dirty: false,
