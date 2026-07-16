@@ -125,23 +125,32 @@ export const raynoteTheme = EditorView.theme(
       borderRight: "1px solid rgba(255, 255, 255, 0.08)",
       padding: "0 14px",
     },
+    // Vertical padding lives on the LINE classes, not the header widget —
+    // the classes apply whether the fence is rendered (header/cap widget) or
+    // revealed (raw ```), so entering/leaving the block never shifts layout.
     ".cm-codeblock-first": {
       borderTop: "1px solid rgba(255, 255, 255, 0.08)",
       borderRadius: "10px 10px 0 0",
       background: "rgba(255, 255, 255, 0.03)",
       marginTop: "6px",
+      paddingTop: "5px",
+      paddingBottom: "5px",
     },
     ".cm-codeblock-last": {
       borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
       borderRadius: "0 0 10px 10px",
       marginBottom: "6px",
+      paddingBottom: "4px",
     },
     ".cm-code-header": {
       display: "inline-flex",
       width: "100%",
+      // Exactly one text line tall (the strut is 1.6 line-height), so the
+      // widget occupies the same height as the raw ``` text it replaces.
+      height: "1.6em",
+      verticalAlign: "top",
       alignItems: "center",
       justifyContent: "space-between",
-      padding: "4px 0",
     },
     ".cm-code-lang": {
       fontSize: "11px",
@@ -154,8 +163,8 @@ export const raynoteTheme = EditorView.theme(
       display: "inline-flex",
       alignItems: "center",
       justifyContent: "center",
-      width: "22px",
-      height: "22px",
+      width: "20px",
+      height: "20px",
       padding: "0",
       background: "transparent",
       border: "none",
