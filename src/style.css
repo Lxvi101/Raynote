@@ -183,6 +183,9 @@ html, body {
 }
 
 /* ─── Titlebar ─── */
+/* Dragging is programmatic (startDragging() on mousedown in main.js), so no
+   -webkit-app-region here — CSS regions swallow mouse events and leave dead
+   zones between children on the transparent WKWebView. */
 #titlebar {
   display: flex;
   align-items: center;
@@ -190,7 +193,6 @@ html, body {
   height: 42px;
   padding: 0 12px;
   flex-shrink: 0;
-  -webkit-app-region: drag;
   border-bottom: 1px solid var(--border);
 }
 
@@ -198,7 +200,6 @@ html, body {
   display: flex;
   align-items: center;
   gap: 6px;
-  -webkit-app-region: no-drag;
 }
 
 .titlebar-left {
@@ -213,7 +214,6 @@ html, body {
   color: var(--text-secondary);
   letter-spacing: 0.02em;
   margin-left: 8px;
-  -webkit-app-region: drag;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1843,7 +1843,6 @@ button:focus-visible {
 /* ─── Sticky note windows ─── */
 /* Programmatic drag via startDragging() — disable CSS regions so the whole bar can initiate drag */
 .sticky-mode #titlebar {
-  -webkit-app-region: no-drag;
   cursor: grab;
 }
 

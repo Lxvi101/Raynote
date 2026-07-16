@@ -4039,22 +4039,21 @@ function setupEventListeners() {
     .getElementById("btn-minimize")
     .addEventListener("click", () => getCurrentWindow().minimize());
 
-  // Sticky: CSS -webkit-app-region / data-tauri-drag-region fail to hit the gap between tint and
-  // window controls on transparent WKWebView; use the window API instead.
-  if (isSticky) {
+  // Titlebar dragging (all windows): CSS -webkit-app-region /
+  // data-tauri-drag-region leave dead zones between children on the
+  // transparent WKWebView, so drive dragging through the window API instead —
+  // every pixel of the bar is a drag handle except the interactive controls.
+  {
     const tb = document.getElementById("titlebar");
-    tb.removeAttribute("data-tauri-drag-region");
-    document
-      .querySelector(".titlebar-drag-spacer")
-      ?.removeAttribute("data-tauri-drag-region");
     tb.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
-      if (
-        e.target.closest(".titlebar-btn") ||
-        e.target.closest(".sticky-tint-dd")
-      )
-        return;
+      if (e.target.closest(".titlebar-btn, .sticky-tint-dd")) return;
       void getCurrentWindow().startDragging();
+    });
+    // macOS titlebar convention: double-click zooms the window.
+    tb.addEventListener("dblclick", (e) => {
+      if (e.target.closest(".titlebar-btn, .sticky-tint-dd")) return;
+      void getCurrentWindow().toggleMaximize();
     });
   }
 
