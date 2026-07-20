@@ -109,6 +109,48 @@ fn assets_dir() -> PathBuf {
     dir
 }
 
+const MAX_IMPORTED_ASSET_BYTES: usize = 100 * 1024 * 1024;
+
+fn sanitize_asset_name(name: &str) -> String {
+    let cleaned = Path::new(name)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("file")
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let cleaned = cleaned.trim_matches('.');
+    if cleaned.is_empty() {
+        "file".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+fn new_asset_name(original_name: &str) -> String {
+    let safe_name = sanitize_asset_name(original_name);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{}", nanos, safe_name)
+}
+
+fn asset_path(name: &str) -> Result<PathBuf, String> {
+    if name.is_empty()
+        || Path::new(name).file_name().and_then(|value| value.to_str()) != Some(name)
+    {
+        return Err("Invalid asset name".into());
+    }
+    Ok(assets_dir().join(name))
+}
+
 fn cache_root_dir() -> PathBuf {
     let base = dirs_next::cache_dir()
         .or_else(|| dirs_next::home_dir().map(|h| h.join("Library").join("Caches")))
@@ -875,26 +917,30 @@ fn set_dock_visible(visible: bool) {
 }
 
 #[tauri::command]
-fn save_asset(name: String, data_base64: String) -> Result<String, String> {
-    let dir = assets_dir();
+fn save_asset(name: String, data_base64: String) -> Result<(String, String), String> {
     let data = general_purpose::STANDARD
         .decode(&data_base64)
         .map_err(|e| e.to_string())?;
-    let path = dir.join(&name);
+    if data.len() > MAX_IMPORTED_ASSET_BYTES {
+        return Err("File is larger than the 100 MB import limit".into());
+    }
+    let original_name = sanitize_asset_name(&name);
+    let asset_name = new_asset_name(&original_name);
+    let path = asset_path(&asset_name)?;
     fs::write(&path, &data).map_err(|e| e.to_string())?;
-    Ok(name)
+    Ok((asset_name, original_name))
 }
 
 #[tauri::command]
 fn read_asset(name: String) -> Result<String, String> {
-    let path = assets_dir().join(&name);
+    let path = asset_path(&name)?;
     let data = fs::read(&path).map_err(|e| e.to_string())?;
     Ok(general_purpose::STANDARD.encode(&data))
 }
 
 #[tauri::command]
 fn reveal_asset(name: String) -> Result<(), String> {
-    let path = assets_dir().join(&name);
+    let path = asset_path(&name)?;
     if !path.exists() {
         return Err("Asset not found".into());
     }
@@ -917,25 +963,179 @@ fn copy_to_assets(source_path: String) -> Result<(String, String), String> {
         .ok_or("Invalid filename")?
         .to_string_lossy()
         .to_string();
-    let safe_name = original_name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let asset_name = format!("{}-{}", ts, safe_name);
-
-    let dir = assets_dir();
-    let dest = dir.join(&asset_name);
+    let asset_name = new_asset_name(&original_name);
+    let dest = asset_path(&asset_name)?;
     fs::copy(source, &dest).map_err(|e| e.to_string())?;
+    Ok((asset_name, original_name))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetInfo {
+    name: String,
+    original_name: String,
+    size: u64,
+    modified: u64,
+    reference_count: u64,
+}
+
+fn collect_asset_references(dir: &Path, counts: &mut HashMap<String, u64>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_asset_references(&path, counts);
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        let mut rest = content.as_str();
+        while let Some(index) = rest.find("asset:") {
+            rest = &rest[index + 6..];
+            let length = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                .map(char::len_utf8)
+                .sum::<usize>();
+            if length == 0 {
+                continue;
+            }
+            let name = &rest[..length];
+            *counts.entry(name.to_string()).or_insert(0) += 1;
+            rest = &rest[length..];
+        }
+    }
+}
+
+fn list_assets_blocking() -> Result<Vec<AssetInfo>, String> {
+    // This intentionally performs full note reads only on explicit Files-panel
+    // refreshes. It must never be put on the startup or note-selection path.
+    let mut references = HashMap::new();
+    collect_asset_references(&spaces_root_dir(), &mut references);
+
+    let mut assets = Vec::new();
+    for entry in fs::read_dir(assets_dir()).map_err(|e| e.to_string())?.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let metadata = entry.metadata().map_err(|e| e.to_string())?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_secs())
+            .unwrap_or(0);
+        let original_name = name
+            .split_once('-')
+            .filter(|(prefix, _)| prefix.chars().all(|c| c.is_ascii_digit()))
+            .map(|(_, value)| value.to_string())
+            .unwrap_or_else(|| name.clone());
+        assets.push(AssetInfo {
+            reference_count: references.get(&name).copied().unwrap_or(0),
+            name,
+            original_name,
+            size: metadata.len(),
+            modified,
+        });
+    }
+    assets.sort_by(|a, b| b.modified.cmp(&a.modified));
+    Ok(assets)
+}
+
+#[tauri::command]
+async fn list_assets() -> Result<Vec<AssetInfo>, String> {
+    tauri::async_runtime::spawn_blocking(list_assets_blocking)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn delete_assets(names: Vec<String>) -> Result<u64, String> {
+    let mut deleted = 0;
+    for name in names {
+        let path = asset_path(&name)?;
+        if path.exists() {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+#[tauri::command]
+async fn import_asset_url(url: String) -> Result<(String, String), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only HTTP and HTTPS files can be imported".into());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .user_agent("Raynote/0.1")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("Download failed with status {}", response.status()));
+    }
+    if response.content_length().unwrap_or(0) > MAX_IMPORTED_ASSET_BYTES as u64 {
+        return Err("File is larger than the 100 MB import limit".into());
+    }
+
+    let header_name = response
+        .headers()
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split("filename=").nth(1))
+        .map(|value| value.trim().trim_matches('"').to_string());
+    let content_extension = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| match value.split(';').next().unwrap_or("").trim() {
+            "image/png" => Some("png"),
+            "image/jpeg" => Some("jpg"),
+            "image/gif" => Some("gif"),
+            "image/webp" => Some("webp"),
+            "image/svg+xml" => Some("svg"),
+            "application/pdf" => Some("pdf"),
+            _ => None,
+        });
+    let url_name = response
+        .url()
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("download")
+        .to_string();
+    let mut original_name = sanitize_asset_name(header_name.as_deref().unwrap_or(&url_name));
+    if Path::new(&original_name).extension().is_none() {
+        if let Some(extension) = content_extension {
+            original_name.push('.');
+            original_name.push_str(extension);
+        }
+    }
+
+    let mut data = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if data.len() + chunk.len() > MAX_IMPORTED_ASSET_BYTES {
+            return Err("File is larger than the 100 MB import limit".into());
+        }
+        data.extend_from_slice(&chunk);
+    }
+    let asset_name = new_asset_name(&original_name);
+    fs::write(asset_path(&asset_name)?, data).map_err(|e| e.to_string())?;
     Ok((asset_name, original_name))
 }
 
@@ -1184,6 +1384,9 @@ pub fn run() {
             read_asset,
             copy_to_assets,
             reveal_asset,
+            list_assets,
+            delete_assets,
+            import_asset_url,
             create_sticky_window,
             set_global_shortcut,
         ])

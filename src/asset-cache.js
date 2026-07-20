@@ -50,6 +50,14 @@ export function getAssetBlobUrl(assetName) {
   return p;
 }
 
+/** Forget a deleted/replaced asset and release its object URL. */
+export function forgetAssetBlobUrl(assetName) {
+  const url = blobCache.get(assetName);
+  if (url) URL.revokeObjectURL(url);
+  blobCache.delete(assetName);
+  inFlight.delete(assetName);
+}
+
 /** Load an image into the given .lazy-image container — used by the preview pane. */
 export async function loadAssetImage(container, assetName) {
   try {

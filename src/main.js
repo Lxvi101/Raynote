@@ -6,7 +6,7 @@ import hljs from "highlight.js";
 import "highlight.js/styles/github-dark-dimmed.min.css";
 import "katex/dist/katex.min.css";
 import { editor, TextareaBackend } from "./editor-adapter.js";
-import { loadAssetImage } from "./asset-cache.js";
+import { forgetAssetBlobUrl, loadAssetImage } from "./asset-cache.js";
 import "./style.css";
 
 // ─── Spaces ───
@@ -1263,6 +1263,10 @@ function createSettingsPanel() {
             <span class="settings-nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="1.6" y="1.6" width="5.6" height="5.6" rx="1.3" stroke="currentColor" stroke-width="1.3"/><rect x="8.8" y="1.6" width="5.6" height="5.6" rx="1.3" stroke="currentColor" stroke-width="1.3"/><rect x="1.6" y="8.8" width="5.6" height="5.6" rx="1.3" stroke="currentColor" stroke-width="1.3"/><rect x="8.8" y="8.8" width="5.6" height="5.6" rx="1.3" stroke="currentColor" stroke-width="1.3"/></svg></span>
             <span>Spaces</span>
           </button>
+          <button class="settings-nav-item" data-cat="files">
+            <span class="settings-nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M3 1.6h6l4 4v8.8H3V1.6Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 1.8v4h3.8M5.2 9h5.6M5.2 11.5h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span>
+            <span>Files</span>
+          </button>
           <button class="settings-nav-item" data-cat="appearance">
             <span class="settings-nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.4" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.6V14.4A6.4 6.4 0 0 0 8 1.6Z" fill="currentColor"/></svg></span>
             <span>Appearance</span>
@@ -1403,6 +1407,26 @@ function createSettingsPanel() {
             </div>
           </div>
 
+          <div class="settings-cat hidden" data-cat="files">
+            <h2 class="settings-cat-title">Files</h2>
+            <div class="files-summary" id="files-summary">
+              <div class="files-summary-stat"><strong>—</strong><span>Files</span></div>
+              <div class="files-summary-stat"><strong>—</strong><span>Storage</span></div>
+              <div class="files-summary-stat"><strong>—</strong><span>Unused</span></div>
+            </div>
+            <div class="files-toolbar">
+              <span class="files-scan-note" id="files-scan-note">Open this panel to check file references.</span>
+              <div class="files-toolbar-actions">
+                <button type="button" class="files-button" id="files-refresh-btn">Refresh</button>
+                <button type="button" class="files-button files-button-danger" id="files-clean-btn" disabled>Remove unused</button>
+              </div>
+            </div>
+            <div class="settings-card files-card" id="files-list">
+              <div class="files-empty">Select Refresh to scan files.</div>
+            </div>
+            <div class="settings-group-caption">Files are stored once in the shared <code>Raynote/assets</code> folder and linked from notes. Notes in Trash still count as references so restoring them remains safe. Cleanup only happens when you ask.</div>
+          </div>
+
           <div class="settings-cat hidden" data-cat="shortcuts">
             <h2 class="settings-cat-title">Shortcuts</h2>
             <div class="settings-group">
@@ -1509,7 +1533,28 @@ function createSettingsPanel() {
         .querySelector(`.settings-cat[data-cat="${item.dataset.cat}"]`)
         .classList.remove("hidden");
       if (settingsScroll) settingsScroll.scrollTop = 0;
+      if (item.dataset.cat === "files") refreshFilesSettings(true);
     });
+  });
+
+  panel.querySelector("#files-refresh-btn").addEventListener("click", () =>
+    refreshFilesSettings(true),
+  );
+  panel.querySelector("#files-clean-btn").addEventListener("click", () =>
+    removeUnusedFiles(),
+  );
+  panel.querySelector("#files-list").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-file-action]");
+    if (!button) return;
+    const name = button.closest(".files-row")?.dataset.asset;
+    if (!name) return;
+    if (button.dataset.fileAction === "reveal") {
+      invoke("reveal_asset", { name }).catch((err) =>
+        showCopyToast(`Could not reveal file: ${err}`),
+      );
+    } else if (button.dataset.fileAction === "delete") {
+      deleteManagedFile(name);
+    }
   });
 
   // Dock hide toggle
@@ -1591,6 +1636,125 @@ function createSettingsPanel() {
 }
 
 const settingsPanel = createSettingsPanel();
+
+let managedFiles = [];
+let filesRefreshGeneration = 0;
+
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** index;
+  return `${value.toFixed(index === 0 || value >= 10 ? 0 : 1)} ${units[index]}`;
+}
+
+function renderManagedFiles(files) {
+  const list = document.getElementById("files-list");
+  const summary = document.getElementById("files-summary");
+  const cleanButton = document.getElementById("files-clean-btn");
+  if (!list || !summary || !cleanButton) return;
+  const unused = files.filter((file) => file.referenceCount === 0);
+  const totalSize = files.reduce((total, file) => total + file.size, 0);
+  const unusedSize = unused.reduce((total, file) => total + file.size, 0);
+  summary.innerHTML = `
+    <div class="files-summary-stat"><strong>${files.length}</strong><span>Files</span></div>
+    <div class="files-summary-stat"><strong>${formatFileSize(totalSize)}</strong><span>Storage</span></div>
+    <div class="files-summary-stat"><strong>${unused.length}</strong><span>${formatFileSize(unusedSize)} unused</span></div>
+  `;
+  cleanButton.disabled = unused.length === 0;
+  if (files.length === 0) {
+    list.innerHTML = `<div class="files-empty">No attached files yet.</div>`;
+    return;
+  }
+  list.innerHTML = files
+    .map(
+      (file) => `
+        <div class="files-row" data-asset="${escapeHtml(file.name)}">
+          <div class="files-row-icon" aria-hidden="true">${IMAGE_EXTS.test(file.originalName) ? "▧" : "≡"}</div>
+          <div class="files-row-info">
+            <span class="files-row-name" title="${escapeHtml(file.originalName)}">${escapeHtml(file.originalName)}</span>
+            <span class="files-row-meta">${formatFileSize(file.size)} · ${file.referenceCount === 0 ? '<em>Unused</em>' : `${file.referenceCount} ${file.referenceCount === 1 ? "reference" : "references"}`}</span>
+          </div>
+          <div class="files-row-actions">
+            <button type="button" data-file-action="reveal" title="Show in Finder" aria-label="Show ${escapeHtml(file.originalName)} in Finder">↗</button>
+            <button type="button" data-file-action="delete" class="files-row-delete" title="Delete file" aria-label="Delete ${escapeHtml(file.originalName)}">×</button>
+          </div>
+        </div>`,
+    )
+    .join("");
+}
+
+async function refreshFilesSettings(force = false) {
+  const list = document.getElementById("files-list");
+  const note = document.getElementById("files-scan-note");
+  if (!list || !note) return;
+  if (!force && managedFiles.length > 0) {
+    renderManagedFiles(managedFiles);
+    return;
+  }
+  const generation = ++filesRefreshGeneration;
+  list.innerHTML = `<div class="files-empty files-loading"><span class="files-spinner"></span>Checking note references…</div>`;
+  note.textContent = "Scanning only because the Files panel is open…";
+  try {
+    const files = await invoke("list_assets");
+    if (generation !== filesRefreshGeneration) return;
+    managedFiles = files;
+    renderManagedFiles(files);
+    note.textContent = `Checked ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  } catch (err) {
+    if (generation !== filesRefreshGeneration) return;
+    list.innerHTML = `<div class="files-empty files-error">Could not scan files: ${escapeHtml(String(err))}</div>`;
+    note.textContent = "Scan failed";
+  }
+}
+
+async function deleteManagedFile(name) {
+  const file = managedFiles.find((item) => item.name === name);
+  if (!file) return;
+  const referenced = file.referenceCount > 0;
+  const ok = await showConfirmDialog({
+    title: referenced ? "Delete linked file?" : "Delete unused file?",
+    message: referenced
+      ? `“${file.originalName}” is linked ${file.referenceCount} ${file.referenceCount === 1 ? "time" : "times"}. Deleting it will leave those links broken.`
+      : `Permanently delete “${file.originalName}”? This cannot be undone.`,
+    confirmLabel: "Delete",
+    destructive: true,
+  });
+  if (!ok) return;
+  try {
+    await invoke("delete_assets", { names: [name] });
+    forgetAssetBlobUrl(name);
+    managedFiles = managedFiles.filter((item) => item.name !== name);
+    renderManagedFiles(managedFiles);
+    showCopyToast("File deleted");
+  } catch (err) {
+    showCopyToast(`Could not delete file: ${err}`);
+  }
+}
+
+async function removeUnusedFiles() {
+  const unused = managedFiles.filter((file) => file.referenceCount === 0);
+  if (unused.length === 0) return;
+  const bytes = unused.reduce((total, file) => total + file.size, 0);
+  const ok = await showConfirmDialog({
+    title: "Remove unused files?",
+    message: `Permanently delete ${unused.length} unused ${unused.length === 1 ? "file" : "files"} and free ${formatFileSize(bytes)}?`,
+    confirmLabel: "Remove",
+    destructive: true,
+  });
+  if (!ok) return;
+  try {
+    await invoke("delete_assets", { names: unused.map((file) => file.name) });
+    unused.forEach((file) => forgetAssetBlobUrl(file.name));
+    const names = new Set(unused.map((file) => file.name));
+    managedFiles = managedFiles.filter((file) => !names.has(file.name));
+    renderManagedFiles(managedFiles);
+    showCopyToast(`${unused.length} ${unused.length === 1 ? "file" : "files"} removed`);
+  } catch (err) {
+    showCopyToast(`Could not remove files: ${err}`);
+    refreshFilesSettings(true);
+  }
+}
 
 function openSettings() {
   if (isSticky) return;
@@ -3329,6 +3493,103 @@ function saveTodoChange() {
 
 // ─── Drag & drop file handling (uses Tauri native events) ───
 const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
+const MAX_BROWSER_FILE_BYTES = 100 * 1024 * 1024;
+let assetImportQueue = Promise.resolve();
+
+function setDropStatus(message, detail = "") {
+  const editorArea = document.getElementById("editor-area");
+  let status = editorArea.querySelector(".drop-status");
+  if (!status) {
+    status = document.createElement("div");
+    status.className = "drop-status";
+    status.innerHTML = `<span class="drop-status-spinner"></span><span class="drop-status-copy"><strong></strong><small></small></span>`;
+    editorArea.appendChild(status);
+  }
+  status.querySelector("strong").textContent = message;
+  status.querySelector("small").textContent = detail;
+  status.classList.add("visible");
+}
+
+function hideDropStatus() {
+  document.querySelector("#editor-area .drop-status")?.classList.remove("visible");
+}
+
+function markdownForAsset(assetName, originalName) {
+  return IMAGE_EXTS.test(originalName)
+    ? `![${originalName}|100%|center](asset:${assetName})`
+    : `[${originalName}](asset:${assetName})`;
+}
+
+function queueAssetImports(imports) {
+  assetImportQueue = assetImportQueue
+    .catch(() => {})
+    .then(() => runAssetImports(imports));
+}
+
+async function runAssetImports(imports) {
+  if (!state.currentId || imports.length === 0) return;
+  if (state.mode === "preview") {
+    setMode("edit");
+    editor.focus();
+  }
+
+  let attached = 0;
+  let failed = 0;
+  let firstError = "";
+  for (let index = 0; index < imports.length; index++) {
+    const item = imports[index];
+    setDropStatus(
+      item.loadingLabel,
+      imports.length > 1 ? `${index + 1} of ${imports.length} · ${item.name}` : item.name,
+    );
+    try {
+      const [assetName, originalName] = await item.import();
+      insertAtCursor(markdownForAsset(assetName, originalName) + "\n");
+      attached++;
+    } catch (err) {
+      console.error("Asset import failed", err);
+      if (!firstError) firstError = String(err);
+      failed++;
+    }
+  }
+  managedFiles = [];
+  hideDropStatus();
+  if (attached > 0) {
+    showCopyToast(`${attached} ${attached === 1 ? "file" : "files"} attached${failed ? `, ${failed} failed` : ""}`);
+  } else if (failed > 0) {
+    showCopyToast(firstError ? `Failed: ${firstError}` : "Failed to attach file");
+  }
+}
+
+function browserFileToBase64(file) {
+  if (file.size > MAX_BROWSER_FILE_BYTES) {
+    return Promise.reject(new Error("File is larger than the 100 MB import limit"));
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("Could not read dropped file"));
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.readAsDataURL(file);
+  });
+}
+
+function urlsFromDataTransfer(dataTransfer) {
+  const uriList = dataTransfer.getData("text/uri-list");
+  const urls = uriList
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter((value) => value && !value.startsWith("#") && /^https?:\/\//i.test(value));
+  if (urls.length > 0) return [...new Set(urls)];
+
+  const html = dataTransfer.getData("text/html");
+  if (html) {
+    const documentNode = new DOMParser().parseFromString(html, "text/html");
+    const candidate = documentNode.querySelector("img[src], a[href]")?.getAttribute("src") ||
+      documentNode.querySelector("a[href]")?.getAttribute("href");
+    if (candidate && /^https?:\/\//i.test(candidate)) return [candidate];
+  }
+  return [];
+}
 
 function setupDropHandler() {
   const editorArea = document.getElementById("editor-area");
@@ -3346,37 +3607,81 @@ function setupDropHandler() {
       if (paths.length > 0) handleDroppedPaths(paths);
     }
   });
+
+  // Browser-origin drags (images, download links, and File blobs) do not have
+  // native filesystem paths. Handle them through the DOM and let Rust fetch
+  // remote URLs so CORS and slow network responses do not block the WebView.
+  editorArea.addEventListener("dragover", (event) => {
+    if (!event.dataTransfer) return;
+    const types = [...event.dataTransfer.types];
+    if (types.includes("Files") || types.includes("text/uri-list") || types.includes("text/html")) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      editorArea.classList.add("drop-active");
+    }
+  });
+  editorArea.addEventListener("dragleave", (event) => {
+    if (!editorArea.contains(event.relatedTarget)) editorArea.classList.remove("drop-active");
+  });
+  editorArea.addEventListener("drop", (event) => {
+    const dataTransfer = event.dataTransfer;
+    if (!dataTransfer) return;
+    const urls = urlsFromDataTransfer(dataTransfer);
+    const files = [...dataTransfer.files];
+    if (urls.length === 0 && files.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    editorArea.classList.remove("drop-active");
+
+    if (urls.length > 0) {
+      queueAssetImports(
+        urls.map((url, index) => ({
+          name: (() => {
+            try { return decodeURIComponent(new URL(url).pathname.split("/").pop()) || "Download"; }
+            catch { return "Download"; }
+          })(),
+          loadingLabel: "Fetching file…",
+          import: async () => {
+            try {
+              return await invoke("import_asset_url", { url });
+            } catch (networkError) {
+              // Some browser drags include both a protected URL and an
+              // already-materialized File blob. Use that blob when the native
+              // downloader cannot access the user's authenticated resource.
+              const fallback = files[index] || (files.length === 1 ? files[0] : null);
+              if (!fallback) throw networkError;
+              return invoke("save_asset", {
+                name: fallback.name || "file",
+                dataBase64: await browserFileToBase64(fallback),
+              });
+            }
+          },
+        })),
+      );
+      return;
+    }
+    queueAssetImports(
+      files.map((file) => ({
+        name: file.name || "Dropped file",
+        loadingLabel: "Importing file…",
+        import: async () =>
+          invoke("save_asset", {
+            name: file.name || "file",
+            dataBase64: await browserFileToBase64(file),
+          }),
+      })),
+    );
+  });
 }
 
-async function handleDroppedPaths(paths) {
-  if (!state.currentId) return;
-
-  // Drop into whatever editor is active. If we're in preview, jump to raw
-  // edit mode so the user sees the inserted markdown.
-  if (state.mode === "preview") {
-    setMode("edit");
-    editor.focus();
-  }
-
-  for (const filePath of paths) {
-    try {
-      const [assetName, originalName] = await invoke("copy_to_assets", {
-        sourcePath: filePath,
-      });
-
-      let markdown;
-      if (IMAGE_EXTS.test(originalName)) {
-        markdown = `![${originalName}|100%|center](asset:${assetName})`;
-      } else {
-        markdown = `[${originalName}](asset:${assetName})`;
-      }
-
-      insertAtCursor(markdown + "\n");
-      showCopyToast("File attached");
-    } catch {
-      showCopyToast("Failed to attach file");
-    }
-  }
+function handleDroppedPaths(paths) {
+  queueAssetImports(
+    paths.map((filePath) => ({
+      name: filePath.split(/[\\/]/).pop() || "File",
+      loadingLabel: "Copying file…",
+      import: () => invoke("copy_to_assets", { sourcePath: filePath }),
+    })),
+  );
 }
 
 function insertAtCursor(text) {
