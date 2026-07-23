@@ -9,6 +9,17 @@ import { syntaxTree } from "@codemirror/language";
 import katex from "katex";
 import { getAssetBlobUrl } from "../asset-cache.js";
 
+/** Unwrap a CommonMark <destination> while preserving its literal filename. */
+export function normalizeMarkdownDestination(raw) {
+  const value = (raw || "").trim();
+  if (value.startsWith("<") && value.endsWith(">")) {
+    return value
+      .slice(1, -1)
+      .replace(/\\([\\<>])/g, "$1");
+  }
+  return value;
+}
+
 // ─── Clipboard (self-contained; widgets can't reach main.js helpers) ───
 function copyText(text) {
   if (navigator.clipboard?.writeText) {

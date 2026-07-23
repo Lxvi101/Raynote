@@ -21,6 +21,7 @@ import {
   ImageWidget,
   MathWidget,
   parseAlt,
+  normalizeMarkdownDestination,
 } from "./widgets.js";
 
 const formattingMark = Decoration.mark({ class: "cm-formatting" });
@@ -257,7 +258,13 @@ export const inlinePlugin = ViewPlugin.fromClass(
               replaceWith(
                 node.from,
                 node.to,
-                new ImageWidget(m[2].trim(), alt, width, align, false),
+                new ImageWidget(
+                  normalizeMarkdownDestination(m[2]),
+                  alt,
+                  width,
+                  align,
+                  false,
+                ),
               );
               return false;
             }
@@ -380,7 +387,9 @@ export const inlinePlugin = ViewPlugin.fromClass(
       const touched = touches(linkNode.from, linkNode.to);
       let url = "";
       for (let c = linkNode.firstChild; c; c = c.nextSibling) {
-        if (c.name === "URL") url = doc.sliceString(c.from, c.to);
+        if (c.name === "URL") {
+          url = normalizeMarkdownDestination(doc.sliceString(c.from, c.to));
+        }
       }
       decos.push(
         Decoration.mark({

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::{WebviewWindow, WebviewWindowBuilder},
@@ -309,6 +309,9 @@ struct AppState {
     /// True while a scan is currently running for that space — used to avoid
     /// firing duplicate scans when the frontend re-enters a space.
     scans_in_progress: RwLock<HashMap<String, bool>>,
+    /// Serializes note writes with the final scan-and-delete phase of manual
+    /// orphan cleanup so a save cannot create a reference mid-cleanup.
+    asset_cleanup_lock: Arc<Mutex<()>>,
     capture_shortcut: RwLock<Option<Shortcut>>,
     toggle_shortcut: RwLock<Option<Shortcut>>,
 }
@@ -641,8 +644,8 @@ fn delete_preview_cache(space: String, id: String) -> bool {
     true
 }
 
-#[tauri::command]
-fn save_note(state: State<'_, AppState>, space: String, id: String, content: String) -> bool {
+fn save_note_blocking(state: &AppState, space: String, id: String, content: String) -> bool {
+    let _cleanup_guard = state.asset_cleanup_lock.lock().unwrap();
     let path = space_notes_dir(&space).join(format!("{}.md", &id));
     if fs::write(&path, &content).is_ok() {
         let modified = fs::metadata(&path)
@@ -665,6 +668,16 @@ fn save_note(state: State<'_, AppState>, space: String, id: String, content: Str
     } else {
         false
     }
+}
+
+#[tauri::command]
+async fn save_note(app: AppHandle, space: String, id: String, content: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        save_note_blocking(state.inner(), space, id, content)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -979,48 +992,139 @@ struct AssetInfo {
     reference_count: u64,
 }
 
-fn collect_asset_references(dir: &Path, counts: &mut HashMap<String, u64>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetInventory {
+    files: Vec<AssetInfo>,
+    scan_complete: bool,
+    scan_error_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetCleanupResult {
+    deleted_names: Vec<String>,
+    skipped_linked: u64,
+}
+
+fn parse_asset_reference(value: &str, angle_wrapped: bool) -> Option<(String, usize)> {
+    if angle_wrapped {
+        let mut name = String::new();
+        let mut escaped = false;
+        for (index, ch) in value.char_indices() {
+            if escaped {
+                name.push(ch);
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '>' {
+                return (!name.is_empty()).then_some((name, index + ch.len_utf8()));
+            } else {
+                name.push(ch);
+            }
+        }
+        return None;
+    }
+
+    let length = value
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .map(char::len_utf8)
+        .sum::<usize>();
+    (length > 0).then(|| (value[..length].to_string(), length))
+}
+
+#[cfg(test)]
+mod asset_reference_tests {
+    use super::parse_asset_reference;
+
+    #[test]
+    fn parses_angle_wrapped_name_with_spaces() {
+        let (name, consumed) = parse_asset_reference("123-my file.pdf>)", true).unwrap();
+        assert_eq!(name, "123-my file.pdf");
+        assert_eq!(&"123-my file.pdf>)"[consumed..], ")");
+    }
+
+    #[test]
+    fn unescapes_angle_bracket_destination_punctuation() {
+        let (name, _) = parse_asset_reference(r"123-a\> b.pdf>", true).unwrap();
+        assert_eq!(name, "123-a> b.pdf");
+    }
+
+    #[test]
+    fn keeps_support_for_legacy_bare_destinations() {
+        let (name, consumed) = parse_asset_reference("123-my_file.pdf)", false).unwrap();
+        assert_eq!(name, "123-my_file.pdf");
+        assert_eq!(&"123-my_file.pdf)"[consumed..], ")");
+    }
+}
+
+fn collect_asset_references(
+    dir: &Path,
+    counts: &mut HashMap<String, u64>,
+    errors: &mut Vec<String>,
+) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            errors.push(format!("Could not read {}: {}", dir.display(), error));
+            return;
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                errors.push(format!("Could not read an entry in {}: {}", dir.display(), error));
+                continue;
+            }
+        };
         let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                errors.push(format!("Could not inspect {}: {}", path.display(), error));
+                continue;
+            }
         };
         if file_type.is_dir() {
-            collect_asset_references(&path, counts);
+            collect_asset_references(&path, counts, errors);
             continue;
         }
         if path.extension().and_then(|value| value.to_str()) != Some("md") {
             continue;
         }
-        let Ok(content) = fs::read_to_string(path) else {
-            continue;
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) => {
+                errors.push(format!("Could not read {}: {}", path.display(), error));
+                continue;
+            }
         };
         let mut rest = content.as_str();
         while let Some(index) = rest.find("asset:") {
+            let angle_wrapped = rest[..index].ends_with('<');
             rest = &rest[index + 6..];
-            let length = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_'))
-                .map(char::len_utf8)
-                .sum::<usize>();
-            if length == 0 {
+            let Some((name, consumed)) = parse_asset_reference(rest, angle_wrapped) else {
                 continue;
-            }
-            let name = &rest[..length];
-            *counts.entry(name.to_string()).or_insert(0) += 1;
-            rest = &rest[length..];
+            };
+            *counts.entry(name).or_insert(0) += 1;
+            rest = &rest[consumed..];
         }
     }
 }
 
-fn list_assets_blocking() -> Result<Vec<AssetInfo>, String> {
+fn scan_asset_references() -> (HashMap<String, u64>, Vec<String>) {
+    let mut references = HashMap::new();
+    let mut errors = Vec::new();
+    collect_asset_references(&spaces_root_dir(), &mut references, &mut errors);
+    (references, errors)
+}
+
+fn list_assets_blocking() -> Result<AssetInventory, String> {
     // This intentionally performs full note reads only on explicit Files-panel
     // refreshes. It must never be put on the startup or note-selection path.
-    let mut references = HashMap::new();
-    collect_asset_references(&spaces_root_dir(), &mut references);
+    let (references, errors) = scan_asset_references();
 
     let mut assets = Vec::new();
     for entry in fs::read_dir(assets_dir()).map_err(|e| e.to_string())?.flatten() {
@@ -1052,14 +1156,61 @@ fn list_assets_blocking() -> Result<Vec<AssetInfo>, String> {
         });
     }
     assets.sort_by(|a, b| b.modified.cmp(&a.modified));
-    Ok(assets)
+    Ok(AssetInventory {
+        files: assets,
+        scan_complete: errors.is_empty(),
+        scan_error_count: errors.len(),
+    })
 }
 
 #[tauri::command]
-async fn list_assets() -> Result<Vec<AssetInfo>, String> {
+async fn list_assets() -> Result<AssetInventory, String> {
     tauri::async_runtime::spawn_blocking(list_assets_blocking)
         .await
         .map_err(|e| e.to_string())?
+}
+
+fn delete_orphan_assets_blocking(names: Vec<String>) -> Result<AssetCleanupResult, String> {
+    let (references, errors) = scan_asset_references();
+    if !errors.is_empty() {
+        return Err(format!(
+            "Cleanup stopped because {} note location{} could not be read",
+            errors.len(),
+            if errors.len() == 1 { "" } else { "s" }
+        ));
+    }
+
+    let mut deleted_names = Vec::new();
+    let mut skipped_linked = 0;
+    for name in names {
+        if references.get(&name).copied().unwrap_or(0) > 0 {
+            skipped_linked += 1;
+            continue;
+        }
+        let path = asset_path(&name)?;
+        if path.exists() {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+            deleted_names.push(name);
+        }
+    }
+    Ok(AssetCleanupResult {
+        deleted_names,
+        skipped_linked,
+    })
+}
+
+#[tauri::command]
+async fn delete_orphan_assets(
+    state: State<'_, AppState>,
+    names: Vec<String>,
+) -> Result<AssetCleanupResult, String> {
+    let cleanup_lock = Arc::clone(&state.asset_cleanup_lock);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _cleanup_guard = cleanup_lock.lock().unwrap();
+        delete_orphan_assets_blocking(names)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1315,6 +1466,7 @@ pub fn run() {
                 notes_caches: RwLock::new(notes_caches),
                 scans_done: RwLock::new(HashMap::new()),
                 scans_in_progress: RwLock::new(HashMap::new()),
+                asset_cleanup_lock: Arc::new(Mutex::new(())),
                 capture_shortcut: RwLock::new(Some(capture)),
                 toggle_shortcut: RwLock::new(Some(toggle)),
             });
@@ -1386,6 +1538,7 @@ pub fn run() {
             reveal_asset,
             list_assets,
             delete_assets,
+            delete_orphan_assets,
             import_asset_url,
             create_sticky_window,
             set_global_shortcut,

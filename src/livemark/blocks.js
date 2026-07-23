@@ -31,6 +31,7 @@ import {
   CodeHeaderWidget,
   CodeCapWidget,
   parseAlt,
+  normalizeMarkdownDestination,
 } from "./widgets.js";
 
 // Skip the whole-document math scan for absurdly large docs.
@@ -137,7 +138,13 @@ function build(state) {
             const { alt, width, align } = parseAlt(m[1]);
             decos.push(
               Decoration.replace({
-                widget: new ImageWidget(m[2].trim(), alt, width, align, true),
+                widget: new ImageWidget(
+                  normalizeMarkdownDestination(m[2]),
+                  alt,
+                  width,
+                  align,
+                  true,
+                ),
                 block: true,
               }).range(line.from, line.to),
             );

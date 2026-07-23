@@ -1638,6 +1638,7 @@ function createSettingsPanel() {
 const settingsPanel = createSettingsPanel();
 
 let managedFiles = [];
+let managedFilesScanComplete = false;
 let filesRefreshGeneration = 0;
 
 function formatFileSize(bytes) {
@@ -1653,13 +1654,15 @@ function renderManagedFiles(files) {
   const summary = document.getElementById("files-summary");
   const cleanButton = document.getElementById("files-clean-btn");
   if (!list || !summary || !cleanButton) return;
-  const unused = files.filter((file) => file.referenceCount === 0);
+  const unused = managedFilesScanComplete
+    ? files.filter((file) => file.referenceCount === 0)
+    : [];
   const totalSize = files.reduce((total, file) => total + file.size, 0);
   const unusedSize = unused.reduce((total, file) => total + file.size, 0);
   summary.innerHTML = `
     <div class="files-summary-stat"><strong>${files.length}</strong><span>Files</span></div>
     <div class="files-summary-stat"><strong>${formatFileSize(totalSize)}</strong><span>Storage</span></div>
-    <div class="files-summary-stat"><strong>${unused.length}</strong><span>${formatFileSize(unusedSize)} unused</span></div>
+    <div class="files-summary-stat"><strong>${managedFilesScanComplete ? unused.length : "—"}</strong><span>${managedFilesScanComplete ? `${formatFileSize(unusedSize)} unused` : "Status unknown"}</span></div>
   `;
   cleanButton.disabled = unused.length === 0;
   if (files.length === 0) {
@@ -1673,7 +1676,7 @@ function renderManagedFiles(files) {
           <div class="files-row-icon" aria-hidden="true">${IMAGE_EXTS.test(file.originalName) ? "▧" : "≡"}</div>
           <div class="files-row-info">
             <span class="files-row-name" title="${escapeHtml(file.originalName)}">${escapeHtml(file.originalName)}</span>
-            <span class="files-row-meta">${formatFileSize(file.size)} · ${file.referenceCount === 0 ? '<em>Unused</em>' : `${file.referenceCount} ${file.referenceCount === 1 ? "reference" : "references"}`}</span>
+            <span class="files-row-meta">${formatFileSize(file.size)} · ${file.referenceCount === 0 ? (managedFilesScanComplete ? '<em>Unused</em>' : "Reference status unknown") : `${file.referenceCount} ${file.referenceCount === 1 ? "reference" : "references"}`}</span>
           </div>
           <div class="files-row-actions">
             <button type="button" data-file-action="reveal" title="Show in Finder" aria-label="Show ${escapeHtml(file.originalName)} in Finder">↗</button>
@@ -1696,13 +1699,22 @@ async function refreshFilesSettings(force = false) {
   list.innerHTML = `<div class="files-empty files-loading"><span class="files-spinner"></span>Checking note references…</div>`;
   note.textContent = "Scanning only because the Files panel is open…";
   try {
-    const files = await invoke("list_assets");
+    // Persist the active editor first so newly added/removed asset links are
+    // part of the disk snapshot Rust is about to inspect.
+    if (state.dirty && state.currentId && !(await saveCurrentNote())) {
+      throw new Error("The current note could not be saved");
+    }
+    const inventory = await invoke("list_assets");
     if (generation !== filesRefreshGeneration) return;
-    managedFiles = files;
-    renderManagedFiles(files);
-    note.textContent = `Checked ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    managedFiles = inventory.files;
+    managedFilesScanComplete = inventory.scanComplete;
+    renderManagedFiles(managedFiles);
+    note.textContent = inventory.scanComplete
+      ? `Checked ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+      : `Cleanup unavailable — ${inventory.scanErrorCount} note location${inventory.scanErrorCount === 1 ? "" : "s"} could not be read`;
   } catch (err) {
     if (generation !== filesRefreshGeneration) return;
+    managedFilesScanComplete = false;
     list.innerHTML = `<div class="files-empty files-error">Could not scan files: ${escapeHtml(String(err))}</div>`;
     note.textContent = "Scan failed";
   }
@@ -1712,17 +1724,34 @@ async function deleteManagedFile(name) {
   const file = managedFiles.find((item) => item.name === name);
   if (!file) return;
   const referenced = file.referenceCount > 0;
+  const statusUnknown = !managedFilesScanComplete && !referenced;
   const ok = await showConfirmDialog({
-    title: referenced ? "Delete linked file?" : "Delete unused file?",
+    title: referenced || statusUnknown ? "Delete possibly linked file?" : "Delete unused file?",
     message: referenced
       ? `“${file.originalName}” is linked ${file.referenceCount} ${file.referenceCount === 1 ? "time" : "times"}. Deleting it will leave those links broken.`
+      : statusUnknown
+        ? `Raynote could not verify every note, so “${file.originalName}” may still be linked. Deleting it may leave a broken link.`
       : `Permanently delete “${file.originalName}”? This cannot be undone.`,
     confirmLabel: "Delete",
     destructive: true,
   });
   if (!ok) return;
   try {
-    await invoke("delete_assets", { names: [name] });
+    if (!referenced && managedFilesScanComplete) {
+      if (state.dirty && state.currentId && !(await saveCurrentNote())) {
+        throw new Error("The current note could not be saved");
+      }
+      const result = await invoke("delete_orphan_assets", { names: [name] });
+      if (!result.deletedNames.includes(name)) {
+        await refreshFilesSettings(true);
+        showCopyToast("File was kept because it is now linked");
+        return;
+      }
+    } else {
+      // Linked/unknown files reach this branch only after the explicit warning
+      // above; this is the intentional force-delete path.
+      await invoke("delete_assets", { names: [name] });
+    }
     forgetAssetBlobUrl(name);
     managedFiles = managedFiles.filter((item) => item.name !== name);
     renderManagedFiles(managedFiles);
@@ -1733,6 +1762,10 @@ async function deleteManagedFile(name) {
 }
 
 async function removeUnusedFiles() {
+  if (!managedFilesScanComplete) {
+    showCopyToast("Cleanup unavailable until every note can be read");
+    return;
+  }
   const unused = managedFiles.filter((file) => file.referenceCount === 0);
   if (unused.length === 0) return;
   const bytes = unused.reduce((total, file) => total + file.size, 0);
@@ -1744,12 +1777,19 @@ async function removeUnusedFiles() {
   });
   if (!ok) return;
   try {
-    await invoke("delete_assets", { names: unused.map((file) => file.name) });
-    unused.forEach((file) => forgetAssetBlobUrl(file.name));
-    const names = new Set(unused.map((file) => file.name));
-    managedFiles = managedFiles.filter((file) => !names.has(file.name));
+    if (state.dirty && state.currentId && !(await saveCurrentNote())) {
+      throw new Error("The current note could not be saved");
+    }
+    const result = await invoke("delete_orphan_assets", {
+      names: unused.map((file) => file.name),
+    });
+    result.deletedNames.forEach(forgetAssetBlobUrl);
+    const deletedNames = new Set(result.deletedNames);
+    managedFiles = managedFiles.filter((file) => !deletedNames.has(file.name));
     renderManagedFiles(managedFiles);
-    showCopyToast(`${unused.length} ${unused.length === 1 ? "file" : "files"} removed`);
+    const skipped = result.skippedLinked;
+    showCopyToast(`${result.deletedNames.length} ${result.deletedNames.length === 1 ? "file" : "files"} removed${skipped ? ` · ${skipped} now linked` : ""}`);
+    if (skipped) await refreshFilesSettings(true);
   } catch (err) {
     showCopyToast(`Could not remove files: ${err}`);
     refreshFilesSettings(true);
@@ -2716,16 +2756,20 @@ async function saveCurrentNote() {
   // contentReady is false while a note switch is still fetching content — the
   // editor text belongs to the previous note and must not be saved under the
   // current id.
-  if (!state.currentId || !state.contentReady) return;
+  if (!state.currentId || !state.contentReady) return false;
   invalidatePreviewCache(state.currentId);
   deleteDiskCachedPreviewHtml(state.currentId);
   const content = editor.getText();
   cacheContent(state.currentId, content); // keep cache in sync with disk
-  await invoke("save_note", {
+  const saved = await invoke("save_note", {
     space: state.currentSpaceId,
     id: state.currentId,
     content,
   });
+  if (!saved) {
+    state.dirty = true;
+    return false;
+  }
   state.dirty = false;
   const rawTitle =
     (content.split("\n")[0] || state.currentId).replace(/^#+\s*/, "").trim() ||
@@ -2749,6 +2793,7 @@ async function saveCurrentNote() {
   state.notes.unshift(updatedMeta);
   renderNoteList(state.searchQuery);
   updateTitle();
+  return true;
 }
 
 async function createNote() {
@@ -3493,7 +3538,9 @@ function saveTodoChange() {
 
 // ─── Drag & drop file handling (uses Tauri native events) ───
 const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
-const MAX_BROWSER_FILE_BYTES = 100 * 1024 * 1024;
+// Browser File blobs cross IPC as base64 and temporarily exist several times
+// in memory. Remote URLs still use the native streaming 100 MB path.
+const MAX_BROWSER_FILE_BYTES = 20 * 1024 * 1024;
 let assetImportQueue = Promise.resolve();
 
 function setDropStatus(message, detail = "") {
@@ -3515,19 +3562,40 @@ function hideDropStatus() {
 }
 
 function markdownForAsset(assetName, originalName) {
+  // CommonMark link destinations containing spaces must be enclosed in angle
+  // brackets. Escape the only punctuation that can terminate that form.
+  const destination = `<asset:${assetName
+    .replace(/\\/g, "\\\\")
+    .replace(/</g, "\\<")
+    .replace(/>/g, "\\>")}>`;
+  const label = originalName.replace(/\\/g, "\\\\").replace(/([\[\]])/g, "\\$1");
   return IMAGE_EXTS.test(originalName)
-    ? `![${originalName}|100%|center](asset:${assetName})`
-    : `[${originalName}](asset:${assetName})`;
+    ? `![${label}|100%|center](${destination})`
+    : `[${label}](${destination})`;
 }
 
 function queueAssetImports(imports) {
+  const job = {
+    imports,
+    noteId: state.currentId,
+    spaceId: state.currentSpaceId,
+  };
   assetImportQueue = assetImportQueue
     .catch(() => {})
-    .then(() => runAssetImports(imports));
+    .then(() => runAssetImports(job));
 }
 
-async function runAssetImports(imports) {
-  if (!state.currentId || imports.length === 0) return;
+function isCurrentImportTarget(job) {
+  return state.currentId === job.noteId && state.currentSpaceId === job.spaceId;
+}
+
+async function runAssetImports(job) {
+  const { imports } = job;
+  if (!job.noteId || imports.length === 0) return;
+  if (!isCurrentImportTarget(job)) {
+    showCopyToast("Attachment cancelled because the note changed");
+    return;
+  }
   if (state.mode === "preview") {
     setMode("edit");
     editor.focus();
@@ -3535,8 +3603,13 @@ async function runAssetImports(imports) {
 
   let attached = 0;
   let failed = 0;
+  let cancelled = false;
   let firstError = "";
   for (let index = 0; index < imports.length; index++) {
+    if (!isCurrentImportTarget(job)) {
+      cancelled = true;
+      break;
+    }
     const item = imports[index];
     setDropStatus(
       item.loadingLabel,
@@ -3544,7 +3617,14 @@ async function runAssetImports(imports) {
     );
     try {
       const [assetName, originalName] = await item.import();
-      insertAtCursor(markdownForAsset(assetName, originalName) + "\n");
+      if (!isCurrentImportTarget(job)) {
+        // The uniquely named file was never linked, so remove it rather than
+        // leaving a surprise orphan after a slow download.
+        await invoke("delete_assets", { names: [assetName] }).catch(() => {});
+        cancelled = true;
+        break;
+      }
+      await insertAtCursor(markdownForAsset(assetName, originalName) + "\n");
       attached++;
     } catch (err) {
       console.error("Asset import failed", err);
@@ -3553,8 +3633,15 @@ async function runAssetImports(imports) {
     }
   }
   managedFiles = [];
+  managedFilesScanComplete = false;
   hideDropStatus();
-  if (attached > 0) {
+  if (cancelled) {
+    showCopyToast(
+      attached > 0
+        ? `${attached} attached · remaining files cancelled because the note changed`
+        : "Attachment cancelled because the note changed",
+    );
+  } else if (attached > 0) {
     showCopyToast(`${attached} ${attached === 1 ? "file" : "files"} attached${failed ? `, ${failed} failed` : ""}`);
   } else if (failed > 0) {
     showCopyToast(firstError ? `Failed: ${firstError}` : "Failed to attach file");
@@ -3563,7 +3650,7 @@ async function runAssetImports(imports) {
 
 function browserFileToBase64(file) {
   if (file.size > MAX_BROWSER_FILE_BYTES) {
-    return Promise.reject(new Error("File is larger than the 100 MB import limit"));
+    return Promise.reject(new Error("Browser file blobs are limited to 20 MB; download the file locally and drag it from Finder"));
   }
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -3684,7 +3771,7 @@ function handleDroppedPaths(paths) {
   );
 }
 
-function insertAtCursor(text) {
+async function insertAtCursor(text) {
   const { start, end } = editor.getSelection();
   const v = editor.getText();
   const before = v.substring(0, start);
@@ -3695,7 +3782,7 @@ function insertAtCursor(text) {
   const pos = start + insert.length;
   editor.setSelection(pos, pos);
   state.dirty = true;
-  saveCurrentNote();
+  await saveCurrentNote();
 }
 
 const PIN_ICON_SVG = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M9.5 2L14 6.5L10.5 10L11.5 14.5L8 11L4.5 14.5L5.5 10L2 6.5L6.5 2L8 4.5L9.5 2Z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;

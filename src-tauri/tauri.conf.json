@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nickel-org/json-schema/refs/heads/main/tauri/tauri.conf.schema.json",
   "productName": "Raynote",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.raynote.notes",
   "build": {
     "frontendDist": "../dist",
