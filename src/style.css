@@ -211,14 +211,19 @@ html, body {
 .titlebar-left {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
+}
+
+.titlebar-right {
+  flex: 0 0 auto;
 }
 
 .note-title-chip {
   display: flex;
   align-items: center;
   gap: 10px;
-  width: min(100%, 620px);
+  flex: 1 1 620px;
+  min-width: 0;
+  max-width: 620px;
   height: 40px;
   padding: 0 14px;
   border: 1px solid rgba(255, 255, 255, 0.105);
@@ -246,6 +251,7 @@ html, body {
 .titlebar-btn {
   width: 38px;
   height: 38px;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;
