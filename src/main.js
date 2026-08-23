@@ -2533,6 +2533,15 @@ function setSpaceSwitcherOpen(open) {
   const el = document.getElementById("space-switcher");
   const trigger = document.getElementById("space-switcher-trigger");
   if (!el || !trigger || trigger.disabled) open = false;
+  if (open) {
+    // Moving focus from CodeMirror to chrome can expose WebKit's native DOM
+    // selection in system blue. Collapse both selection layers first.
+    const selection = editor.getSelection();
+    if (selection.start !== selection.end) {
+      editor.setSelection(selection.end, selection.end);
+    }
+    window.getSelection()?.removeAllRanges();
+  }
   el?.classList.toggle("open", open);
   trigger?.classList.toggle("open", open);
   trigger?.setAttribute("aria-expanded", open ? "true" : "false");
@@ -4785,6 +4794,20 @@ function setupEventListeners() {
     // calls preventDefault on those events. Don't double-fire app shortcuts
     // that share keys with CM6 commands (Cmd+Z, Cmd+Shift+Z).
     if (e.defaultPrevented) return;
+
+    // If focus is on app chrome, WebKit's default Cmd+A selects the rendered
+    // editor DOM instead of the editor document. Keep select-all native only
+    // inside actual text controls/editors.
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.altKey &&
+      e.key.toLowerCase() === "a" &&
+      !e.target.closest("input, textarea, .cm-content, [contenteditable='true']")
+    ) {
+      e.preventDefault();
+      window.getSelection()?.removeAllRanges();
+      return;
+    }
 
     const sc = state.shortcuts;
 

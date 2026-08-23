@@ -390,6 +390,17 @@ html, body {
   pointer-events: auto;
 }
 
+#sidebar,
+#sidebar * {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#sidebar input {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 .sidebar-title-row {
   position: relative;
   z-index: 12;
