@@ -93,12 +93,12 @@
       <div id="main">
         <aside id="sidebar" aria-label="Notes">
           <div class="sidebar-title-row">
-            <div class="sidebar-title">
+            <button id="space-switcher-trigger" class="sidebar-title" type="button" title="Switch space" aria-label="Switch space" aria-haspopup="menu" aria-expanded="false">
               <span>My Notes</span>
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <svg class="space-switcher-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
                 <path d="M3 4.5 6 7.5l3-3" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
-            </div>
+            </button>
             <button id="btn-new" class="sidebar-btn" title="New note (Cmd+N)" aria-label="New note">
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
             </button>
@@ -123,8 +123,9 @@
                   <path d="M3.7 5.5h1.2M3.7 7.8h1.2" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/>
                 </svg>
               </button>
-              <div class="note-title-chip">
+              <div class="note-title-chip" role="button" tabindex="0" aria-label="Rename current note">
                 <span class="titlebar-title" id="titlebar-title">Raynote</span>
+                <input id="titlebar-title-input" class="titlebar-title-input" type="text" aria-label="Note title" autocomplete="off" spellcheck="false" hidden />
               </div>
               <div id="sticky-tint-picker" class="sticky-tint-picker"></div>
               <div class="titlebar-drag-spacer" aria-hidden="true"></div>

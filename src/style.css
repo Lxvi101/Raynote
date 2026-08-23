@@ -234,6 +234,20 @@ html, body {
               0 8px 24px rgba(0, 0, 0, 0.12);
   -webkit-backdrop-filter: blur(20px) saturate(140%);
   backdrop-filter: blur(20px) saturate(140%);
+  cursor: text;
+  transition: background var(--transition), border-color var(--transition),
+              box-shadow var(--transition);
+}
+
+.note-title-chip:hover {
+  border-color: rgba(255, 255, 255, 0.17);
+}
+
+.note-title-chip.renaming {
+  background: rgba(5, 5, 8, 0.56);
+  border-color: rgba(255, 83, 101, 0.48);
+  box-shadow: 0 0 0 3px rgba(255, 70, 90, 0.10),
+              inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .titlebar-title {
@@ -246,6 +260,23 @@ html, body {
   white-space: nowrap;
   min-width: 0;
   flex: 1 1 auto;
+}
+
+.titlebar-title-input {
+  width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  font: 520 12.5px var(--font);
+  letter-spacing: 0.005em;
+  user-select: text;
+}
+
+.titlebar-title-input:focus-visible {
+  outline: none;
 }
 
 .titlebar-btn {
@@ -360,6 +391,8 @@ html, body {
 }
 
 .sidebar-title-row {
+  position: relative;
+  z-index: 12;
   min-width: 286px;
   display: flex;
   align-items: center;
@@ -372,14 +405,34 @@ html, body {
   display: flex;
   align-items: center;
   gap: 7px;
+  padding: 3px 5px 3px 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
   color: var(--text);
-  font-size: 15px;
-  font-weight: 620;
+  font: 620 15px var(--font);
   letter-spacing: -0.012em;
+  cursor: pointer;
+}
+
+.sidebar-title:disabled {
+  cursor: default;
 }
 
 .sidebar-title svg {
   color: var(--text-dim);
+}
+
+.space-switcher-chevron {
+  transition: transform var(--transition), opacity var(--transition);
+}
+
+.sidebar-title.open .space-switcher-chevron {
+  transform: rotate(180deg);
+}
+
+.sidebar-title:disabled .space-switcher-chevron {
+  opacity: 0;
 }
 
 .sidebar-header {
@@ -2486,73 +2539,108 @@ input[type="range"].setting-range:disabled {
   );
 }
 
-/* ─── Spaces switcher (sidebar bottom) ───
-   Minimal emoji row with a sliding highlight behind the active space. */
+/* ─── Spaces switcher ───
+   Compact floatie anchored beneath the My Notes heading. */
 .space-switcher {
-  flex-shrink: 0;
-  padding: 4px 10px 8px;
-  display: flex;
-  justify-content: center;
+  position: absolute;
+  top: calc(100% - 4px);
+  left: 14px;
+  width: 218px;
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 12px;
+  background: rgba(13, 13, 17, 0.92);
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.42),
+              inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  -webkit-backdrop-filter: blur(24px) saturate(145%);
+  backdrop-filter: blur(24px) saturate(145%);
+  opacity: 0;
+  transform: translateY(-5px) scale(0.98);
+  transform-origin: top left;
+  pointer-events: none;
+  visibility: hidden;
+  transition: opacity 140ms ease-out, transform 160ms cubic-bezier(0.2, 0, 0, 1),
+              visibility 0s linear 160ms;
+}
+
+.space-switcher.open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+  visibility: visible;
+  transition-delay: 0s;
 }
 
 .space-switcher.hidden {
   display: none;
 }
 
-.space-switcher-scroll {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-}
-
-.space-switcher-indicator {
-  position: absolute;
-  top: 0;
-  left: 0;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.08);
-  opacity: 0;
-  pointer-events: none;
-  transition: transform 160ms cubic-bezier(0.2, 0, 0, 1),
-              width 160ms cubic-bezier(0.2, 0, 0, 1),
-              opacity 120ms ease;
-  will-change: transform, width;
-}
-
 .space-btn {
-  position: relative;
-  z-index: 1;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
+  width: 100%;
+  height: 34px;
+  gap: 9px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
   background: transparent;
-  border: none;
-  border-radius: 6px;
   color: var(--text-secondary);
   cursor: pointer;
-  flex-shrink: 0;
-  font: inherit;
-  opacity: 0.42;
-  transition: opacity var(--transition), transform var(--transition);
+  font: 520 12px var(--font);
+  text-align: left;
+  transition: background var(--transition), color var(--transition);
 }
 
-.space-btn:hover {
-  opacity: 0.78;
+.space-btn:hover,
+.space-btn:focus-visible {
+  outline: none;
+  background: rgba(255, 255, 255, 0.065);
+  color: var(--text);
 }
 
 .space-btn.active {
-  opacity: 1;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .space-emoji {
-  font-size: 15px;
+  width: 20px;
+  font-size: 14px;
   line-height: 1;
+  text-align: center;
   flex-shrink: 0;
+}
+
+.space-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.space-shortcut {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-dim);
+  font: 500 10px var(--font-mono);
+}
+
+.space-check {
+  display: none;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.space-btn.active .space-check {
+  display: block;
+}
+
+.space-btn.active .space-shortcut {
+  display: none;
 }
 
 /* Space switch content animation — toggled via .space-switch-animate on <html>.
@@ -2581,7 +2669,8 @@ html.space-switch-in #editor-area {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .space-switcher-indicator,
+  .space-switcher,
+  .space-switcher-chevron,
   .space-btn {
     transition: none;
   }

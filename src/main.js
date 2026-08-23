@@ -1138,7 +1138,9 @@ const palette = $("#command-palette");
 const paletteInput = $("#palette-input");
 const paletteResults = $("#palette-results");
 const sidebar = $("#sidebar");
+const titlebarChip = $(".note-title-chip");
 const titlebarTitle = $("#titlebar-title");
+const titlebarTitleInput = $("#titlebar-title-input");
 
 // ─── Editor adapter setup ───
 // `editor` (imported) is the abstraction; backends are registered for each
@@ -2527,74 +2529,104 @@ async function switchToSpace(spaceId) {
   }
 }
 
+function setSpaceSwitcherOpen(open) {
+  const el = document.getElementById("space-switcher");
+  const trigger = document.getElementById("space-switcher-trigger");
+  if (!el || !trigger || trigger.disabled) open = false;
+  el?.classList.toggle("open", open);
+  trigger?.classList.toggle("open", open);
+  trigger?.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) {
+    requestAnimationFrame(() => el.querySelector(".space-btn.active")?.focus());
+  }
+}
+
 function getSpaceSwitcherEl() {
   let el = document.getElementById("space-switcher");
   if (el || isSticky) return el;
-  const sb = document.getElementById("sidebar");
-  if (!sb) return null;
+  const titleRow = document.querySelector(".sidebar-title-row");
+  const trigger = document.getElementById("space-switcher-trigger");
+  if (!titleRow || !trigger) return null;
   el = document.createElement("div");
   el.id = "space-switcher";
   el.className = "space-switcher";
-  // Single delegated click handler — buttons get rebuilt on every render.
+  el.setAttribute("role", "menu");
+  el.setAttribute("aria-label", "Spaces");
+
+  trigger.addEventListener("click", () => {
+    setSpaceSwitcherOpen(!el.classList.contains("open"));
+  });
+  // Single delegated handlers — buttons get rebuilt on every render.
   el.addEventListener("click", (e) => {
     const btn = e.target.closest(".space-btn");
     if (!btn) return;
     const id = btn.dataset.space;
-    if (id) switchToSpace(id);
+    setSpaceSwitcherOpen(false);
+    trigger.focus();
+    if (id) void switchToSpace(id);
   });
-  sb.appendChild(el);
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      setSpaceSwitcherOpen(false);
+      trigger.focus();
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    const buttons = [...el.querySelectorAll(".space-btn")];
+    if (!buttons.length) return;
+    e.preventDefault();
+    const current = buttons.indexOf(document.activeElement);
+    const next =
+      e.key === "Home"
+        ? 0
+        : e.key === "End"
+          ? buttons.length - 1
+          : e.key === "ArrowDown"
+            ? (current + 1) % buttons.length
+            : (current - 1 + buttons.length) % buttons.length;
+    buttons[next].focus();
+  });
+  titleRow.appendChild(el);
   return el;
-}
-
-function positionSpaceSwitcherIndicator() {
-  const scroll = document.querySelector(".space-switcher-scroll");
-  if (!scroll) return;
-  const indicator = scroll.querySelector(".space-switcher-indicator");
-  const active = scroll.querySelector(".space-btn.active");
-  if (!indicator) return;
-  if (!active) {
-    indicator.style.opacity = "0";
-    return;
-  }
-  indicator.style.width = `${active.offsetWidth}px`;
-  indicator.style.height = `${active.offsetHeight}px`;
-  indicator.style.transform = `translate(${active.offsetLeft}px, ${active.offsetTop}px)`;
-  indicator.style.opacity = "1";
 }
 
 function renderSpaceSwitcher() {
   if (isSticky) return;
   const el = getSpaceSwitcherEl();
-  if (!el) return;
+  const trigger = document.getElementById("space-switcher-trigger");
+  if (!el || !trigger) return;
   const spaces = getSpaces();
-  // Single-space mode: hide entirely (see the user's brief — the switcher
-  // only appears once a second space exists).
+  // A single space needs no switcher; keep the heading but remove its menu affordance.
   if (spaces.length <= 1) {
+    setSpaceSwitcherOpen(false);
+    trigger.disabled = true;
+    trigger.removeAttribute("title");
     el.classList.add("hidden");
     el.innerHTML = "";
     return;
   }
+  trigger.disabled = false;
+  trigger.title = "Switch space";
   el.classList.remove("hidden");
-  el.innerHTML = `
-    <div class="space-switcher-scroll">
-      <div class="space-switcher-indicator" aria-hidden="true"></div>
-      ${spaces
-        .map((s, i) => {
-          const isActive = s.id === state.currentSpaceId;
-          return `
-        <button type="button"
-                class="space-btn${isActive ? " active" : ""}"
-                data-space="${escapeHtml(s.id)}"
-                title="${escapeHtml(s.name)} (⌘${i + 1})"
-                aria-label="${escapeHtml(s.name)}"
-                aria-current="${isActive ? "page" : "false"}">
-          <span class="space-emoji" aria-hidden="true">${escapeHtml(s.emoji || DEFAULT_SPACE_EMOJI)}</span>
-        </button>`;
-        })
-        .join("")}
-    </div>
-  `;
-  requestAnimationFrame(positionSpaceSwitcherIndicator);
+  el.innerHTML = spaces
+    .map((s, i) => {
+      const isActive = s.id === state.currentSpaceId;
+      return `
+      <button type="button"
+              class="space-btn${isActive ? " active" : ""}"
+              data-space="${escapeHtml(s.id)}"
+              title="${escapeHtml(s.name)} (⌘${i + 1})"
+              role="menuitemradio"
+              aria-checked="${isActive ? "true" : "false"}">
+        <span class="space-emoji" aria-hidden="true">${escapeHtml(s.emoji || DEFAULT_SPACE_EMOJI)}</span>
+        <span class="space-name">${escapeHtml(s.name)}</span>
+        <kbd class="space-shortcut">⌘${i + 1}</kbd>
+        <svg class="space-check" width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="m3 7.2 2.5 2.5L11 4.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>`;
+    })
+    .join("");
 }
 
 async function loadMoreNotes() {
@@ -2790,31 +2822,39 @@ async function saveCurrentNote() {
   // editor text belongs to the previous note and must not be saved under the
   // current id.
   if (!state.currentId || !state.contentReady) return false;
-  invalidatePreviewCache(state.currentId);
-  deleteDiskCachedPreviewHtml(state.currentId);
+  const noteId = state.currentId;
+  const spaceId = state.currentSpaceId;
   const content = editor.getText();
-  cacheContent(state.currentId, content); // keep cache in sync with disk
+  invalidatePreviewCache(noteId);
+  deleteDiskCachedPreviewHtml(noteId);
+  cacheContent(noteId, content); // keep cache in sync with disk
   const saved = await invoke("save_note", {
-    space: state.currentSpaceId,
-    id: state.currentId,
+    space: spaceId,
+    id: noteId,
     content,
   });
   if (!saved) {
-    state.dirty = true;
+    if (state.currentId === noteId && state.currentSpaceId === spaceId) {
+      state.dirty = true;
+    }
     return false;
   }
-  state.dirty = false;
+  if (state.currentId === noteId && state.currentSpaceId === spaceId) {
+    state.dirty = false;
+  }
+  // A blur-triggered title save can finish after navigation. The backend has
+  // the right note, but this window may now be showing another space's list.
+  if (state.currentSpaceId !== spaceId) return true;
   const rawTitle =
-    (content.split("\n")[0] || state.currentId).replace(/^#+\s*/, "").trim() ||
-    state.currentId;
+    (content.split("\n")[0] || noteId).replace(/^#+\s*/, "").trim() || noteId;
   const title = truncateTitle(
     rawTitle === AUTO_TITLE_PLACEHOLDER ? "New Note" : rawTitle,
   );
   const previewText = content.split("\n").slice(1, 3).join(" ").slice(0, 100);
   const now = Math.floor(Date.now() / 1000);
-  const idx = state.notes.findIndex((n) => n.id === state.currentId);
+  const idx = state.notes.findIndex((n) => n.id === noteId);
   const updatedMeta = {
-    id: state.currentId,
+    id: noteId,
     title,
     modified: now,
     preview: previewText,
@@ -3893,7 +3933,7 @@ async function insertAtCursor(text) {
   await saveCurrentNote();
 }
 
-const PIN_ICON_SVG = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M9.5 2L14 6.5L10.5 10L11.5 14.5L8 11L4.5 14.5L5.5 10L2 6.5L6.5 2L8 4.5L9.5 2Z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const BOOKMARK_ICON_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z" fill="currentColor"/></svg>`;
 
 function renderNoteItem(n) {
   const isPinned = isNotePinned(n.id);
@@ -3908,7 +3948,7 @@ function renderNoteItem(n) {
     <div class="note-item-header">
         <div class="${titleClass}"${titleAttr}>${escapeHtml(displayTitle)}</div>
         <button class="note-pin-btn${isPinned ? " is-pinned" : ""}" data-pin-id="${n.id}" title="${isPinned ? "Unpin" : "Pin"} note" aria-label="${isPinned ? "Unpin" : "Pin"} note">
-          ${PIN_ICON_SVG}
+          ${BOOKMARK_ICON_SVG}
         </button>
       </div>
       <div class="note-item-preview">${escapeHtml(n.preview)}</div>
@@ -4013,6 +4053,88 @@ function showEmptyState() {
     </div>
   `;
   applyModeChrome("preview");
+}
+
+let titleRenameNoteId = null;
+
+function closeTitleRenameInput() {
+  titleRenameNoteId = null;
+  titlebarChip.classList.remove("renaming");
+  titlebarTitleInput.hidden = true;
+  titlebarTitle.hidden = false;
+}
+
+function beginTitleRename() {
+  if (isSticky || !state.currentId || !state.contentReady || titleRenameNoteId) {
+    return;
+  }
+  const firstLine = editor.getText().split("\n", 1)[0] || "";
+  const currentTitle = firstLine.replace(/^#+\s*/, "").trim();
+  titleRenameNoteId = state.currentId;
+  titlebarTitleInput.value =
+    currentTitle === AUTO_TITLE_PLACEHOLDER ? "" : currentTitle;
+  titlebarTitle.hidden = true;
+  titlebarTitleInput.hidden = false;
+  titlebarChip.classList.add("renaming");
+  titlebarTitleInput.focus();
+  titlebarTitleInput.select();
+}
+
+async function finishTitleRename(shouldSave) {
+  const noteId = titleRenameNoteId;
+  if (!noteId) return;
+  const title = titlebarTitleInput.value.trim();
+  closeTitleRenameInput();
+
+  if (
+    !shouldSave ||
+    !title ||
+    state.currentId !== noteId ||
+    !state.contentReady
+  ) {
+    updateTitle();
+    return;
+  }
+
+  const content = editor.getText();
+  const newlineIndex = content.indexOf("\n");
+  const oldFirstLine = newlineIndex >= 0 ? content.slice(0, newlineIndex) : content;
+  const rest = newlineIndex >= 0 ? content.slice(newlineIndex) : "";
+  const newFirstLine = `# ${title}`;
+  if (newFirstLine === oldFirstLine) {
+    updateTitle();
+    return;
+  }
+
+  const selection = editor.getSelection();
+  const delta = newFirstLine.length - oldFirstLine.length;
+  const remapPosition = (position) =>
+    position > oldFirstLine.length
+      ? Math.max(0, position + delta)
+      : Math.min(position, newFirstLine.length);
+  const updatedContent = newFirstLine + rest;
+  editor.setText(updatedContent);
+  editor.setSelection(
+    remapPosition(selection.start),
+    remapPosition(selection.end),
+  );
+  state.dirty = true;
+  clearTimeout(_saveTimeout);
+  _saveTimeout = null;
+
+  const note = state.notes.find((item) => item.id === noteId);
+  if (note) note.title = truncateTitle(title);
+  renderNoteList(state.searchQuery);
+  updateTitle();
+
+  const saved = await saveCurrentNote();
+  if (!saved) {
+    showCopyToast("Note title could not be saved");
+    return;
+  }
+  if (state.currentId === noteId && state.mode === "preview") {
+    renderPreview(updatedContent, noteId);
+  }
 }
 
 function updateTitle() {
@@ -4431,7 +4553,7 @@ function renderPaletteItems(items) {
     .map(
       (item, i) => `
     <li class="palette-item ${i === state.selectedPaletteIndex ? "selected" : ""}${item.pinned ? " palette-item-pinned" : ""}" data-index="${i}">
-      <span class="palette-item-label">${item.pinned ? `<span class="palette-pin-icon">${PIN_ICON_SVG}</span>` : ""}${escapeHtml(item.label)}</span>
+      <span class="palette-item-label">${item.pinned ? `<span class="palette-pin-icon">${BOOKMARK_ICON_SVG}</span>` : ""}${escapeHtml(item.label)}</span>
       <span class="palette-item-hint">${escapeHtml(item.hint)}</span>
     </li>
   `,
@@ -4531,6 +4653,40 @@ function setupEventListeners() {
     .querySelector(".palette-backdrop")
     ?.addEventListener("click", closePalette);
 
+  document.addEventListener("mousedown", (e) => {
+    const switcher = document.getElementById("space-switcher");
+    if (
+      switcher?.classList.contains("open") &&
+      !e.target.closest("#space-switcher, #space-switcher-trigger")
+    ) {
+      setSpaceSwitcherOpen(false);
+    }
+  });
+
+  // Titlebar title editing
+  titlebarChip.addEventListener("click", (e) => {
+    if (e.target !== titlebarTitleInput) beginTitleRename();
+  });
+  titlebarChip.addEventListener("keydown", (e) => {
+    if (e.target === titlebarTitleInput) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      beginTitleRename();
+    }
+  });
+  titlebarTitleInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void finishTitleRename(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      finishTitleRename(false);
+    }
+  });
+  titlebarTitleInput.addEventListener("blur", () => {
+    void finishTitleRename(true);
+  });
+
   // Titlebar buttons
   document
     .getElementById("btn-sidebar")
@@ -4554,12 +4710,16 @@ function setupEventListeners() {
     const tb = document.getElementById("titlebar");
     tb.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
-      if (e.target.closest(".titlebar-btn, .sticky-tint-dd")) return;
+      if (e.target.closest(".titlebar-btn, .note-title-chip, .sticky-tint-dd")) {
+        return;
+      }
       void getCurrentWindow().startDragging();
     });
     // macOS titlebar convention: double-click zooms the window.
     tb.addEventListener("dblclick", (e) => {
-      if (e.target.closest(".titlebar-btn, .sticky-tint-dd")) return;
+      if (e.target.closest(".titlebar-btn, .note-title-chip, .sticky-tint-dd")) {
+        return;
+      }
       void getCurrentWindow().toggleMaximize();
     });
   }
@@ -4772,9 +4932,13 @@ function setupEventListeners() {
       return;
     }
 
-    // Escape: exit settings, palette, or any active editor mode
+    // Escape: collapse transient UI before leaving the current editor mode.
     if (e.key === "Escape") {
-      if (state.settingsOpen) {
+      const spaceSwitcher = document.getElementById("space-switcher");
+      if (spaceSwitcher?.classList.contains("open")) {
+        setSpaceSwitcherOpen(false);
+        document.getElementById("space-switcher-trigger")?.focus();
+      } else if (state.settingsOpen) {
         closeSettings();
       } else if (state.paletteMode) {
         closePalette();
