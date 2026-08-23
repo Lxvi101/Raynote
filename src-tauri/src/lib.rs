@@ -170,6 +170,17 @@ fn preview_cache_dir() -> PathBuf {
     dir
 }
 
+fn note_content_cache_dir() -> PathBuf {
+    let dir = cache_root_dir().join("note-content-cache");
+    if !dir.exists() {
+        fs::create_dir_all(&dir).expect("Could not create note content cache directory");
+    }
+    dir
+}
+
+const NOTE_CONTENT_CACHE_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const NOTE_CONTENT_CACHE_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
 fn notes_meta_cache_path(space_id: &str) -> PathBuf {
     cache_root_dir().join(format!(
         "notes-meta-cache-{}.json",
@@ -198,6 +209,91 @@ fn preview_cache_path(space: &str, id: &str, content_hash: &str) -> PathBuf {
     let id = safe_cache_part(id);
     let content_hash = safe_cache_part(content_hash);
     preview_cache_dir().join(format!("{}-{}-{}.html", space, id, content_hash))
+}
+
+fn note_content_cache_prefix(space: &str, id: &str) -> String {
+    format!("{}-{}-", safe_cache_part(space), safe_cache_part(id))
+}
+
+fn note_content_cache_path(space: &str, id: &str, source: &Path) -> Option<PathBuf> {
+    let metadata = fs::metadata(source).ok()?;
+    let modified_ns = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(note_content_cache_dir().join(format!(
+        "{}{}-{}.note",
+        note_content_cache_prefix(space, id),
+        modified_ns,
+        metadata.len()
+    )))
+}
+
+fn delete_note_content_cache_entries(space: &str, id: &str, keep: Option<&Path>) {
+    let prefix = note_content_cache_prefix(space, id);
+    let Ok(entries) = fs::read_dir(note_content_cache_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if keep.is_some_and(|kept| kept == path) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if name.starts_with(&prefix) && name.ends_with(".note") {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn prune_note_content_cache() {
+    let Ok(entries) = fs::read_dir(note_content_cache_dir()) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = entry.metadata().ok()?;
+            metadata.is_file().then(|| {
+                (
+                    path,
+                    metadata.len(),
+                    metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                )
+            })
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|(_, size, _)| *size).sum();
+    if total <= NOTE_CONTENT_CACHE_MAX_TOTAL_BYTES {
+        return;
+    }
+    files.sort_by_key(|(_, _, modified)| *modified);
+    for (path, size, _) in files {
+        if total <= NOTE_CONTENT_CACHE_MAX_TOTAL_BYTES {
+            break;
+        }
+        if fs::remove_file(path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+fn cache_note_content(space: &str, id: &str, source: &Path, content: &str) {
+    if content.len() as u64 > NOTE_CONTENT_CACHE_MAX_FILE_BYTES {
+        return;
+    }
+    let Some(cache_path) = note_content_cache_path(space, id, source) else {
+        return;
+    };
+    delete_note_content_cache_entries(space, id, Some(&cache_path));
+    if fs::write(&cache_path, content).is_ok() {
+        prune_note_content_cache();
+    }
 }
 
 // ─── Migration ───
@@ -501,11 +597,11 @@ fn spawn_scan_for_space(handle: AppHandle, space_id: String) -> bool {
         let notes = read_all_notes(&handle, &space_id, &previous);
         write_notes_meta_cache(&space_id, &notes);
 
-        // Hydrate the most-recent note into the OS file cache so the
-        // frontend's auto-select doesn't trigger another iCloud download
-        // immediately after the sidebar finishes filling.
+        // Hydrate the most-recent note into Raynote's bounded local content
+        // cache. This read already happened on the scan thread; persisting it
+        // means the next cold app launch need not touch iCloud for that note.
         if let Some(first) = notes.first() {
-            let _ = fs::read_to_string(space_notes_dir(&space_id).join(format!("{}.md", first.id)));
+            let _ = read_note_blocking(space_id.clone(), first.id.clone());
         }
 
         {
@@ -608,26 +704,72 @@ fn scan_space(app: AppHandle, state: State<'_, AppState>, space: String) -> bool
     spawn_scan_for_space(app, space)
 }
 
-#[tauri::command]
-fn read_note(space: String, id: String) -> String {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteReadResult {
+    content: String,
+    cache_hit: bool,
+}
+
+fn read_note_blocking(space: String, id: String) -> NoteReadResult {
     let path = space_notes_dir(&space).join(format!("{}.md", id));
-    fs::read_to_string(path).unwrap_or_default()
+    if let Some(cache_path) = note_content_cache_path(&space, &id, &path) {
+        if let Ok(content) = fs::read_to_string(&cache_path) {
+            let source_len = fs::metadata(&path).map(|metadata| metadata.len()).ok();
+            if source_len == Some(content.len() as u64) {
+                return NoteReadResult {
+                    content,
+                    cache_hit: true,
+                };
+            }
+            let _ = fs::remove_file(cache_path);
+        }
+    }
+
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    cache_note_content(&space, &id, &path, &content);
+    NoteReadResult {
+        content,
+        cache_hit: false,
+    }
 }
 
 #[tauri::command]
-fn read_preview_cache(space: String, id: String, content_hash: String) -> Option<String> {
-    let path = preview_cache_path(&space, &id, &content_hash);
-    fs::read_to_string(path).ok()
+async fn read_note(space: String, id: String) -> NoteReadResult {
+    tauri::async_runtime::spawn_blocking(move || read_note_blocking(space, id))
+        .await
+        .unwrap_or(NoteReadResult {
+            content: String::new(),
+            cache_hit: false,
+        })
 }
 
 #[tauri::command]
-fn write_preview_cache(space: String, id: String, content_hash: String, html: String) -> bool {
-    let path = preview_cache_path(&space, &id, &content_hash);
-    fs::write(path, html).is_ok()
+async fn read_preview_cache(space: String, id: String, content_hash: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = preview_cache_path(&space, &id, &content_hash);
+        fs::read_to_string(path).ok()
+    })
+    .await
+    .unwrap_or(None)
 }
 
 #[tauri::command]
-fn delete_preview_cache(space: String, id: String) -> bool {
+async fn write_preview_cache(
+    space: String,
+    id: String,
+    content_hash: String,
+    html: String,
+) -> bool {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = preview_cache_path(&space, &id, &content_hash);
+        fs::write(path, html).is_ok()
+    })
+    .await
+    .unwrap_or(false)
+}
+
+fn delete_preview_cache_blocking(space: String, id: String) -> bool {
     let prefix = format!("{}-{}-", safe_cache_part(&space), safe_cache_part(&id));
     let dir = preview_cache_dir();
     if let Ok(entries) = fs::read_dir(dir) {
@@ -644,10 +786,18 @@ fn delete_preview_cache(space: String, id: String) -> bool {
     true
 }
 
+#[tauri::command]
+async fn delete_preview_cache(space: String, id: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || delete_preview_cache_blocking(space, id))
+        .await
+        .unwrap_or(false)
+}
+
 fn save_note_blocking(state: &AppState, space: String, id: String, content: String) -> bool {
     let _cleanup_guard = state.asset_cleanup_lock.lock().unwrap();
     let path = space_notes_dir(&space).join(format!("{}.md", &id));
     if fs::write(&path, &content).is_ok() {
+        cache_note_content(&space, &id, &path, &content);
         let modified = fs::metadata(&path)
             .ok()
             .and_then(|m| m.modified().ok())
@@ -945,10 +1095,14 @@ fn save_asset(name: String, data_base64: String) -> Result<(String, String), Str
 }
 
 #[tauri::command]
-fn read_asset(name: String) -> Result<String, String> {
-    let path = asset_path(&name)?;
-    let data = fs::read(&path).map_err(|e| e.to_string())?;
-    Ok(general_purpose::STANDARD.encode(&data))
+async fn read_asset(name: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = asset_path(&name)?;
+        let data = fs::read(&path).map_err(|e| e.to_string())?;
+        Ok(general_purpose::STANDARD.encode(&data))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

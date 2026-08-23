@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test": "node --test",
+    "benchmark:notes": "node scripts/benchmark-large-notes.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:build": "tauri build",

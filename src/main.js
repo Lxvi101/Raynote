@@ -7,6 +7,7 @@ import "highlight.js/styles/github-dark-dimmed.min.css";
 import "katex/dist/katex.min.css";
 import { editor, TextareaBackend } from "./editor-adapter.js";
 import { forgetAssetBlobUrl, loadAssetImage } from "./asset-cache.js";
+import { ByteLruCache } from "./byte-lru-cache.js";
 import "./style.css";
 
 // ─── Spaces ───
@@ -798,25 +799,24 @@ const state = {
 };
 
 // ─── Preview HTML cache ───
-const previewCache = new Map(); // Map<noteId, { html: string, content: string }>
 const PREVIEW_CACHE_MAX = 60;
+const PREVIEW_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const previewCache = new ByteLruCache({
+  maxEntries: PREVIEW_CACHE_MAX,
+  maxBytes: PREVIEW_CACHE_MAX_BYTES,
+  // JS strings can occupy two bytes per code unit. Count both strings even
+  // though engines may share the content reference with contentCache.
+  sizeOf: ({ html, content }) => (html.length + content.length) * 2,
+});
 let renderGeneration = 0; // monotonically increasing; guards against race conditions
 
 function cachePreviewHtml(noteId, content, html) {
-  // Evict oldest entry if at capacity (simple LRU via insertion order)
-  if (previewCache.size >= PREVIEW_CACHE_MAX && !previewCache.has(noteId)) {
-    const firstKey = previewCache.keys().next().value;
-    previewCache.delete(firstKey);
-  }
   previewCache.set(noteId, { html, content });
 }
 
 function getCachedPreviewHtml(noteId, content) {
   const entry = previewCache.get(noteId);
   if (entry && entry.content === content) {
-    // Move to end (most recently used) for LRU
-    previewCache.delete(noteId);
-    previewCache.set(noteId, entry);
     return entry.html;
   }
   return null;
@@ -885,24 +885,22 @@ function deleteDiskCachedPreviewHtml(noteId, spaceOverride) {
 // stall on an on-demand download — which is what made note switching lag
 // even though the *rendered* HTML was cached. Keep the raw content around
 // too, keyed by id, refreshed on save and dropped on delete.
-const contentCache = new Map(); // Map<noteId, string>
 const CONTENT_CACHE_MAX = 80;
+const CONTENT_CACHE_MAX_BYTES = 24 * 1024 * 1024;
+const contentCache = new ByteLruCache({
+  maxEntries: CONTENT_CACHE_MAX,
+  maxBytes: CONTENT_CACHE_MAX_BYTES,
+  sizeOf: (content) => content.length * 2,
+});
 
 function cacheContent(noteId, content) {
-  if (contentCache.size >= CONTENT_CACHE_MAX && !contentCache.has(noteId)) {
-    contentCache.delete(contentCache.keys().next().value);
-  }
-  contentCache.delete(noteId); // re-insert moves it to MRU position
-  contentCache.set(noteId, content);
+  return contentCache.set(noteId, content);
 }
 
 /** Returns the cached content string, or null if this note isn't cached. */
 function getCachedContent(noteId) {
-  if (!contentCache.has(noteId)) return null;
   const content = contentCache.get(noteId);
-  contentCache.delete(noteId);
-  contentCache.set(noteId, content); // bump to MRU
-  return content;
+  return content === undefined ? null : content;
 }
 
 function hasCachedContent(noteId) {
@@ -911,6 +909,38 @@ function hasCachedContent(noteId) {
 
 function invalidateContentCache(noteId) {
   contentCache.delete(noteId);
+}
+
+// Share native reads between a foreground selection and an idle prefetch.
+// Without this, clicking a note just as the warmer reaches it can start two
+// concurrent iCloud downloads for the same file.
+const noteReadsInFlight = new Map(); // Map<space:id, Promise<NoteReadResult>>
+
+function readNoteContent(space, id) {
+  const key = `${space}:${id}`;
+  const existing = noteReadsInFlight.get(key);
+  if (existing) return existing;
+
+  const pending = invoke("read_note", { space, id })
+    .then((result) => {
+      // Keep a compatibility fallback for a frontend hot reload paired with
+      // an older native process that still returns the bare content string.
+      if (typeof result === "string") {
+        return { content: result, cacheHit: false };
+      }
+      return {
+        content: typeof result?.content === "string" ? result.content : "",
+        cacheHit: result?.cacheHit === true,
+      };
+    })
+    .finally(() => {
+      if (noteReadsInFlight.get(key) === pending) {
+        noteReadsInFlight.delete(key);
+      }
+    });
+
+  noteReadsInFlight.set(key, pending);
+  return pending;
 }
 
 // ─── Markdown render worker ───
@@ -2253,10 +2283,8 @@ async function init() {
       return;
     }
     // Check if note exists by trying to read it (may not be in paginated list)
-    const stickyContent = await invoke("read_note", {
-      space: state.currentSpaceId,
-      id: stickyNoteId,
-    });
+    const stickyRead = await readNoteContent(state.currentSpaceId, stickyNoteId);
+    const stickyContent = stickyRead.content;
     if (!stickyContent) {
       preview.innerHTML =
         '<div class="empty-state">This sticky could not be found.</div>';
@@ -2266,6 +2294,7 @@ async function init() {
       setupTauriListeners();
       return;
     }
+    cacheContent(stickyNoteId, stickyContent);
     await selectNote(stickyNoteId);
     setupStickyTintPicker();
     const target = getPreferredEditor() === "live" ? "live" : "edit";
@@ -2647,7 +2676,8 @@ async function selectNote(id) {
 
   if (!cacheHit) {
     try {
-      content = await invoke("read_note", { space: state.currentSpaceId, id });
+      const result = await readNoteContent(state.currentSpaceId, id);
+      content = result.content;
     } catch (err) {
       if (renderGeneration !== gen || state.currentId !== id) return;
       console.error("Failed to read note:", err);
@@ -2663,6 +2693,7 @@ async function selectNote(id) {
 
   editor.setText(content);
   state.contentReady = true;
+  scheduleAdjacentNotePrefetch(id);
 
   if (surface === "live") {
     const loaded = await ensureLiveEditor().then(
@@ -3318,6 +3349,81 @@ async function renderPreview(content, noteId = null) {
     }
   }
   applyPreviewHtml(html);
+}
+
+// ─── Bounded idle note prefetch ───
+// A cold iCloud read is the dominant note-switch cost. Warm a few notes near
+// the current sidebar position while the app is idle, one at a time. The
+// native layer persists them in a 64 MB source-validated disk cache; only
+// small results enter the byte-bounded JS cache below.
+const CONTENT_PREFETCH_MAX_NOTES = 6;
+const CONTENT_PREFETCH_MAX_BYTES = 768 * 1024;
+let contentPrefetchToken = 0;
+
+function adjacentPrefetchCandidates(currentId) {
+  const currentIndex = state.notes.findIndex((note) => note.id === currentId);
+  if (currentIndex < 0) return state.notes.slice(0, CONTENT_PREFETCH_MAX_NOTES);
+
+  const candidates = [];
+  for (
+    let distance = 1;
+    candidates.length < CONTENT_PREFETCH_MAX_NOTES &&
+    (currentIndex + distance < state.notes.length || currentIndex - distance >= 0);
+    distance++
+  ) {
+    if (currentIndex + distance < state.notes.length) {
+      candidates.push(state.notes[currentIndex + distance]);
+    }
+    if (
+      candidates.length < CONTENT_PREFETCH_MAX_NOTES &&
+      currentIndex - distance >= 0
+    ) {
+      candidates.push(state.notes[currentIndex - distance]);
+    }
+  }
+  return candidates;
+}
+
+function scheduleAdjacentNotePrefetch(currentId) {
+  const token = ++contentPrefetchToken;
+  const space = state.currentSpaceId;
+  const candidates = adjacentPrefetchCandidates(currentId).filter(
+    (note) => note?.id && note.id !== currentId && !hasCachedContent(note.id),
+  );
+  if (candidates.length === 0) return;
+
+  (async () => {
+    for (const note of candidates) {
+      await idleDelay(1200);
+      if (
+        token !== contentPrefetchToken ||
+        state.currentSpaceId !== space ||
+        document.visibilityState === "hidden" ||
+        state.dirty
+      ) {
+        return;
+      }
+      if (hasCachedContent(note.id)) continue;
+
+      let result;
+      try {
+        result = await readNoteContent(space, note.id);
+      } catch {
+        continue;
+      }
+      if (token !== contentPrefetchToken || state.currentSpaceId !== space) {
+        return;
+      }
+
+      const content = result.content;
+      if (content.length * 2 > CONTENT_PREFETCH_MAX_BYTES) continue;
+      if (cacheContent(note.id, content)) {
+        // HTML generation remains worker-backed, idle-only, and limited to
+        // content that is now already resident in the bounded memory cache.
+        scheduleWarmPreviewCache([note]);
+      }
+    }
+  })();
 }
 
 // ─── Background preview warming ───
