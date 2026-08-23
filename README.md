@@ -5,7 +5,7 @@
 <h1 align="center">Raynote</h1>
 
 <p align="center">
-  Just notes. A little bit of Markdown, local files, and some keyboard.
+  Just notes. A little bit of Markdown, local files, and lots of keyboard.
 </p>
 
 <p align="center">
