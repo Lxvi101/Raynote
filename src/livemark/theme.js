@@ -16,7 +16,7 @@ export const raynoteTheme = EditorView.theme(
       fontFamily: "var(--font)",
     },
     ".cm-content": {
-      padding: "28px 40px 48px",
+      padding: "42px var(--content-gutter) 80px",
       caretColor: "var(--accent)",
       lineHeight: "1.7",
     },
@@ -34,7 +34,7 @@ export const raynoteTheme = EditorView.theme(
     },
     "&.cm-focused .cm-selectionBackground, ::selection, .cm-selectionBackground":
       {
-        background: "rgba(124, 111, 247, 0.25) !important",
+        background: "rgba(255, 70, 90, 0.22) !important",
       },
     ".cm-line": { padding: "0" },
     ".cm-placeholder": { color: "var(--text-dim)" },

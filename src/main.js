@@ -783,7 +783,9 @@ const state = {
     localStorage.getItem("raynote-preferred-editor") === "textarea"
       ? "edit"
       : "live",
-  sidebarOpen: true,
+  // The note canvas is the default focus. The notes panel is revealed on
+  // demand from the first titlebar action or the existing shortcut.
+  sidebarOpen: false,
   pinned: false,
   dirty: false,
   // False while a note's content is being fetched — blocks scheduleSave and
@@ -4460,13 +4462,21 @@ function toggleSidebar() {
   if (isSticky) return;
   state.sidebarOpen = !state.sidebarOpen;
   sidebar.classList.toggle("open", state.sidebarOpen);
+  const button = document.getElementById("btn-sidebar");
+  button.classList.toggle("active", state.sidebarOpen);
+  button.setAttribute("aria-expanded", state.sidebarOpen ? "true" : "false");
+  button.setAttribute("aria-label", state.sidebarOpen ? "Hide notes" : "Show notes");
+  button.title = `${state.sidebarOpen ? "Hide" : "Show"} notes (Cmd+Shift+S)`;
 }
 
 // ─── Pin ───
 async function togglePin() {
   state.pinned = !state.pinned;
   await getCurrentWindow().setAlwaysOnTop(state.pinned);
-  document.getElementById("btn-pin").classList.toggle("active", state.pinned);
+  const button = document.getElementById("btn-pin");
+  button.classList.toggle("active", state.pinned);
+  button.setAttribute("aria-pressed", state.pinned ? "true" : "false");
+  button.title = state.pinned ? "Stop keeping app on top" : "Keep app on top";
 }
 
 // ─── Event listeners ───
@@ -4525,9 +4535,8 @@ function setupEventListeners() {
   document
     .getElementById("btn-sidebar")
     .addEventListener("click", toggleSidebar);
-  document
-    .getElementById("btn-settings")
-    .addEventListener("click", openSettings);
+  document.getElementById("btn-settings")?.addEventListener("click", openSettings);
+  document.getElementById("btn-popout")?.addEventListener("click", openNewSticky);
   document.getElementById("btn-pin").addEventListener("click", togglePin);
   document.getElementById("btn-new").addEventListener("click", createNote);
   document
@@ -4535,7 +4544,7 @@ function setupEventListeners() {
     .addEventListener("click", () => closeCurrentWindow());
   document
     .getElementById("btn-minimize")
-    .addEventListener("click", () => getCurrentWindow().minimize());
+    ?.addEventListener("click", () => getCurrentWindow().minimize());
 
   // Titlebar dragging (all windows): CSS -webkit-app-region /
   // data-tauri-drag-region leave dead zones between children on the

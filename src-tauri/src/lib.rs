@@ -143,8 +143,7 @@ fn new_asset_name(original_name: &str) -> String {
 }
 
 fn asset_path(name: &str) -> Result<PathBuf, String> {
-    if name.is_empty()
-        || Path::new(name).file_name().and_then(|value| value.to_str()) != Some(name)
+    if name.is_empty() || Path::new(name).file_name().and_then(|value| value.to_str()) != Some(name)
     {
         return Err("Invalid asset name".into());
     }
@@ -686,7 +685,12 @@ fn search_notes(
 /// True while the iCloud scan for a space is running (or hasn't started yet).
 #[tauri::command]
 fn notes_loading(state: State<'_, AppState>, space: String) -> bool {
-    !*state.scans_done.read().unwrap().get(&space).unwrap_or(&false)
+    !*state
+        .scans_done
+        .read()
+        .unwrap()
+        .get(&space)
+        .unwrap_or(&false)
 }
 
 /// Start a background scan for a space if one isn't already in progress.
@@ -932,12 +936,7 @@ fn permanently_delete_note(space: String, id: String) -> bool {
 }
 
 #[tauri::command]
-fn rename_note(
-    state: State<'_, AppState>,
-    space: String,
-    old_id: String,
-    new_id: String,
-) -> bool {
+fn rename_note(state: State<'_, AppState>, space: String, old_id: String, new_id: String) -> bool {
     let old_path = space_notes_dir(&space).join(format!("{}.md", &old_id));
     let new_path = space_notes_dir(&space).join(format!("{}.md", &new_id));
     if old_path.exists() && !new_path.exists() {
@@ -1005,11 +1004,7 @@ fn move_note_to_space(
 
     // Clear preview cache entries for this note in the source space — they
     // were keyed by source space id, so they can't be reused after the move.
-    let prefix = format!(
-        "{}-{}-",
-        safe_cache_part(&from_space),
-        safe_cache_part(&id)
-    );
+    let prefix = format!("{}-{}-", safe_cache_part(&from_space), safe_cache_part(&id));
     if let Ok(entries) = fs::read_dir(preview_cache_dir()) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1229,7 +1224,11 @@ fn collect_asset_references(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                errors.push(format!("Could not read an entry in {}: {}", dir.display(), error));
+                errors.push(format!(
+                    "Could not read an entry in {}: {}",
+                    dir.display(),
+                    error
+                ));
                 continue;
             }
         };
@@ -1281,7 +1280,10 @@ fn list_assets_blocking() -> Result<AssetInventory, String> {
     let (references, errors) = scan_asset_references();
 
     let mut assets = Vec::new();
-    for entry in fs::read_dir(assets_dir()).map_err(|e| e.to_string())?.flatten() {
+    for entry in fs::read_dir(assets_dir())
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
@@ -1467,7 +1469,7 @@ fn apply_glass_effects(win: &WebviewWindow) {
                         msg_send![ns_window, contentView];
                     let () = msg_send![content_view, setWantsLayer: true];
                     let layer: *mut objc::runtime::Object = msg_send![content_view, layer];
-                    let () = msg_send![layer, setCornerRadius: 12.0_f64];
+                    let () = msg_send![layer, setCornerRadius: 20.0_f64];
                     let () = msg_send![layer, setMasksToBounds: true];
                 },
                 _ => {}

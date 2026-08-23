@@ -15,8 +15,10 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        background: rgba(18, 18, 24, 0.82);
-        border-radius: 12px;
+        background:
+          radial-gradient(circle at 82% 8%, rgba(255, 70, 90, 0.12), transparent 38%),
+          rgba(8, 8, 11, 0.88);
+        border-radius: 20px;
         border: 1px solid rgba(255, 255, 255, 0.08);
         box-shadow: 0 8px 40px rgba(0, 0, 0, 0.55), 0 2px 12px rgba(0, 0, 0, 0.3);
         -webkit-backdrop-filter: blur(20px) saturate(140%);
@@ -88,56 +90,68 @@
       </div>
     </div>
     <div id="app">
-      <div id="titlebar">
-        <div class="titlebar-left">
-          <button id="btn-sidebar" class="titlebar-btn" title="Toggle sidebar (Cmd+Shift+S)">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <rect x="1.4" y="2" width="13.2" height="12" rx="2.8" stroke="currentColor" stroke-width="1.2"/>
-              <path d="M5.8 2.2V13.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
-              <rect x="2.6" y="4.6" width="2.3" height="1" rx="0.5" fill="currentColor"/>
-              <rect x="2.6" y="6.5" width="2.3" height="1" rx="0.5" fill="currentColor"/>
-            </svg>
-          </button>
-          <span class="titlebar-title" id="titlebar-title">Raynote</span>
-          <div id="sticky-tint-picker" class="sticky-tint-picker"></div>
-          <div class="titlebar-drag-spacer" aria-hidden="true"></div>
-        </div>
-        <div class="titlebar-right">
-          <button id="btn-settings" class="titlebar-btn" title="Settings (Cmd+,)">
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-              <circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.2"/>
-              <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
-            </svg>
-          </button>
-          <button id="btn-pin" class="titlebar-btn" title="Pin on top">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M7 1v8M4 3l3-2 3 2M3 13h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
-            </svg>
-          </button>
-          <button id="btn-minimize" class="titlebar-btn" title="Minimize">
-            <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="1.5" rx=".75" fill="currentColor"/></svg>
-          </button>
-          <button id="btn-close" class="titlebar-btn btn-close" title="Close (Cmd+W)">
-            <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-          </button>
-        </div>
-      </div>
-
       <div id="main">
-        <aside id="sidebar" class="open">
-          <div class="sidebar-header">
-            <input type="text" id="search" placeholder="Search notes..." spellcheck="false" />
-            <button id="btn-new" class="sidebar-btn" title="New note (Cmd+N)">
-              <svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <aside id="sidebar" aria-label="Notes">
+          <div class="sidebar-title-row">
+            <div class="sidebar-title">
+              <span>My Notes</span>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                <path d="M3 4.5 6 7.5l3-3" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <button id="btn-new" class="sidebar-btn" title="New note (Cmd+N)" aria-label="New note">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
             </button>
+          </div>
+          <div class="sidebar-header">
+            <svg class="search-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.25"/>
+              <path d="m10.4 10.4 3.1 3.1" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+            </svg>
+            <input type="text" id="search" placeholder="Search notes..." spellcheck="false" aria-label="Search notes" />
           </div>
           <ul id="note-list"></ul>
         </aside>
 
-        <div id="editor-area">
-          <div id="preview" class="visible"></div>
-          <textarea id="editor" spellcheck="false" placeholder="Start writing..."></textarea>
-        </div>
+        <section id="note-surface" aria-label="Current note">
+          <div id="titlebar">
+            <div class="titlebar-left">
+              <button id="btn-sidebar" class="titlebar-btn" title="Show notes (Cmd+Shift+S)" aria-label="Show notes" aria-expanded="false">
+                <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <rect x="2" y="2.5" width="14" height="13" rx="3" stroke="currentColor" stroke-width="1.25"/>
+                  <path d="M6.5 2.8v12.4" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+                  <path d="M3.7 5.5h1.2M3.7 7.8h1.2" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/>
+                </svg>
+              </button>
+              <div class="note-title-chip">
+                <span class="titlebar-title" id="titlebar-title">Raynote</span>
+              </div>
+              <div id="sticky-tint-picker" class="sticky-tint-picker"></div>
+              <div class="titlebar-drag-spacer" aria-hidden="true"></div>
+            </div>
+            <div class="titlebar-right">
+              <button id="btn-popout" class="titlebar-btn" title="Float current note" aria-label="Float current note">
+                <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <rect x="2.5" y="5" width="10.5" height="10.5" rx="2.5" stroke="currentColor" stroke-width="1.25"/>
+                  <path d="M8.5 2.5h7v7M15.2 2.8 9 9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <button id="btn-pin" class="titlebar-btn" title="Keep app on top" aria-label="Keep app on top" aria-pressed="false">
+                <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <path d="m6.3 3.2 5.5 5.5M9.8 2.3l5.9 5.9-2.2 1.2-2.2 3.6-2.1-2.1-3.6 2.2-1.2-1.2 2.3-3.5-2.1-2.1 3.5-2.2 1.7-1.8ZM7 11l-4.3 4.3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <button id="btn-close" class="titlebar-btn btn-close" title="Close (Cmd+W)" aria-label="Close window">
+                <svg width="13" height="13" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 1l10 10M11 1 1 11" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div id="editor-area">
+            <div id="preview" class="visible"></div>
+            <textarea id="editor" spellcheck="false" placeholder="Start writing..."></textarea>
+          </div>
+        </section>
       </div>
 
       <div id="command-palette" class="hidden">
